@@ -171,6 +171,7 @@ def create_endpoint(
     workers_max: int = 3,
     idle_timeout: int = 5,
     execution_timeout_ms: int = 600000,
+    env: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Create a serverless endpoint from a template.
 
@@ -183,11 +184,12 @@ def create_endpoint(
         workers_max: Maximum concurrent workers.
         idle_timeout: Seconds idle before scale-down.
         execution_timeout_ms: Max milliseconds per job.
+        env: Environment variables for workers (overrides template env).
 
     Returns:
         Dict with id, name, gpuTypeIds, networkVolumeId, etc.
     """
-    return _rest(api_key, "POST", "/endpoints", {
+    body: dict[str, Any] = {
         "name": name,
         "templateId": template_id,
         "gpuTypeIds": gpu_type_ids,
@@ -200,7 +202,10 @@ def create_endpoint(
         "scalerType": "QUEUE_DELAY",
         "scalerValue": 4,
         "executionTimeoutMs": execution_timeout_ms,
-    })
+    }
+    if env:
+        body["env"] = env
+    return _rest(api_key, "POST", "/endpoints", body)
 
 
 def get_endpoint(api_key: str, endpoint_id: str) -> dict[str, Any]:

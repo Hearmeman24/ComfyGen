@@ -388,48 +388,35 @@ def run(args: argparse.Namespace) -> None:
         _log("  Your models go on this volume at /runpod-volume/ComfyUI/models/")
         _log("  You can resize it later in the RunPod dashboard.\n")
 
-    # ── Step 6: Create Template + Endpoint ──
+    # ── Step 6: Create Endpoint ──
     if not non_interactive:
         _log("─── Step 6: Serverless Endpoint ──────────────────────────────\n")
 
-    # Build env vars for the worker template
-    template_env: dict[str, str] = {
+    # Build env vars for the endpoint workers
+    endpoint_env: dict[str, str] = {
         "RUNTIME_REPO_URL": runpod_api.RUNTIME_REPO_URL,
         "RUNTIME_REPO_REF": "main",
     }
     if s3_config:
-        template_env["AWS_ACCESS_KEY_ID"] = s3_config["aws_access_key_id"]
-        template_env["AWS_SECRET_ACCESS_KEY"] = s3_config["aws_secret_access_key"]
-        template_env["S3_BUCKET"] = s3_config["s3_bucket"]
+        endpoint_env["AWS_ACCESS_KEY_ID"] = s3_config["aws_access_key_id"]
+        endpoint_env["AWS_SECRET_ACCESS_KEY"] = s3_config["aws_secret_access_key"]
+        endpoint_env["S3_BUCKET"] = s3_config["s3_bucket"]
         if s3_config.get("s3_region"):
-            template_env["S3_REGION"] = s3_config["s3_region"]
+            endpoint_env["S3_REGION"] = s3_config["s3_region"]
         if s3_config.get("s3_endpoint_url"):
-            template_env["S3_ENDPOINT_URL"] = s3_config["s3_endpoint_url"]
+            endpoint_env["S3_ENDPOINT_URL"] = s3_config["s3_endpoint_url"]
     if civitai_token:
-        template_env["CIVITAI_TOKEN"] = civitai_token
-
-    _log("  Creating serverless template...")
-    import uuid
-    template_name = f"comfygen-{uuid.uuid4().hex[:8]}"
-    try:
-        template = runpod_api.create_template(
-            api_key,
-            name=template_name,
-            env=template_env,
-        )
-    except RuntimeError as e:
-        output.error(f"Failed to create template: {e}")
-
-    template_id = template["id"]
+        endpoint_env["CIVITAI_TOKEN"] = civitai_token
 
     _log("  Creating serverless endpoint...")
     try:
         endpoint = runpod_api.create_endpoint(
             api_key,
             name="comfygen",
-            template_id=template_id,
+            template_id=runpod_api.BASE_TEMPLATE_ID,
             gpu_type_ids=tier["gpu_ids"],
             volume_id=volume_id,
+            env=endpoint_env,
         )
     except RuntimeError as e:
         output.error(f"Failed to create endpoint: {e}")
@@ -438,7 +425,6 @@ def run(args: argparse.Namespace) -> None:
     if not non_interactive:
         gpu_names = ", ".join(tier["gpu_ids"])
         _log(f"  ✓ Endpoint created: {endpoint_id}")
-        _log(f"    Template: {template_id}")
         _log(f"    GPUs: {gpu_names}")
         _log(f"    Workers: 0 min, 3 max (scale to zero)")
         _log(f"    FlashBoot: enabled\n")
@@ -457,7 +443,7 @@ def run(args: argparse.Namespace) -> None:
     init_data = {
         "initialized_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "endpoint_id": endpoint_id,
-        "template_id": template_id,
+        "template_id": runpod_api.BASE_TEMPLATE_ID,
         "volume_id": volume_id,
         "datacenter": tier["datacenter"],
         "tier": tier["name"],
