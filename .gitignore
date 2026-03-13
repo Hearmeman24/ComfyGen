@@ -1,0 +1,16 @@
+.env
+.venv/
+__pycache__/
+*.egg-info/
+dist/
+build/
+output/
+automation/
+wan_animate_test/
+architecture.md
+issues.md
+.DS_Store
+serverless-docker/
+serverless-runtime/
+AGENTS.md
+CLAUDE.md

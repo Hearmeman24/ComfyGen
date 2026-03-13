@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "comfy-gen"
+version = "0.2.0"
+description = "Agent-first CLI for executing ComfyUI workflows on RunPod serverless"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.11"
+keywords = ["comfyui", "runpod", "serverless", "image-generation", "cli"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Multimedia :: Graphics",
+]
+
+[project.scripts]
+comfy-gen = "comfy_gen.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["comfy_gen*"]
