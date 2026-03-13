@@ -23,7 +23,7 @@
 
 ## Use with Your Favorite AI Agent
 
-ComfyGen ships with an **agent skill file** at `comfy_gen/skills/comfy-gen.md`. Drop it into your agent's skill/tool directory and it can submit workflows, download models, check job status, and manage your RunPod infrastructure — all through natural language.
+ComfyGen ships with an **agent skill file** at `SKILL.md` in the repo root. Drop it into your agent's skill/tool directory and it can submit workflows, download models, check job status, and manage your RunPod infrastructure — all through natural language.
 
 ```
 You: "Submit this workflow with seed 42 and download the output"

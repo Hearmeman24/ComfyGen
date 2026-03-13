@@ -134,6 +134,75 @@ def _test_storage(s3_config: dict[str, str]) -> None:
     client.delete_object(Bucket=bucket, Key=test_key)
 
 
+EXAMPLE_MODEL_URL = (
+    "https://huggingface.co/Nextcloud-AI/sdxl-turbo/resolve/main/"
+    "sd_xl_turbo_1.0_fp16.safetensors"
+)
+EXAMPLE_WORKFLOW = "examples/sdxl_turbo_portrait.json"
+
+
+def _run_example(api_key: str, endpoint_id: str) -> None:
+    """Download an example model and generate a test image."""
+    from comfy_gen import download, serverless
+
+    # Download the model
+    _log("\n  Downloading SDXL Turbo model (~3.5GB)...")
+    _log(f"  comfy-gen download url {EXAMPLE_MODEL_URL} --dest checkpoints\n")
+
+    try:
+        dl_result = download.submit_download(
+            downloads=[{
+                "source": "url",
+                "url": EXAMPLE_MODEL_URL,
+                "dest": "checkpoints",
+            }],
+            timeout=600,
+            endpoint_id=endpoint_id,
+        )
+        if not dl_result.get("ok"):
+            _log(f"  ✗ Download failed: {dl_result.get('error', 'Unknown error')}")
+            return
+        files = dl_result.get("files", [])
+        if files:
+            f = files[0]
+            _log(f"  ✓ Downloaded {f['filename']} ({f['size_mb']:.0f} MB)\n")
+        else:
+            _log("  ✓ Download complete\n")
+    except Exception as e:
+        _log(f"  ✗ Download failed: {e}")
+        return
+
+    # Find the example workflow
+    import pathlib
+
+    # Resolve workflow path relative to the package root
+    pkg_root = pathlib.Path(__file__).resolve().parent.parent
+    workflow_path = pkg_root / EXAMPLE_WORKFLOW
+    if not workflow_path.exists():
+        _log(f"  ✗ Example workflow not found at {workflow_path}")
+        return
+
+    # Submit the workflow
+    _log("  Generating a portrait with SDXL Turbo...")
+    _log(f"  comfy-gen submit {EXAMPLE_WORKFLOW}\n")
+
+    try:
+        result = serverless.submit(
+            workflow_path=str(workflow_path),
+            timeout=300,
+            endpoint_id=endpoint_id,
+        )
+        url = result.get("output", {}).get("url", "")
+        elapsed = result.get("elapsed_seconds", 0)
+        if url:
+            _log(f"  ✓ Image generated in {elapsed}s!")
+            _log(f"  View your image: {url}\n")
+        else:
+            _log(f"  ✓ Generation complete in {elapsed}s (no URL in output)\n")
+    except Exception as e:
+        _log(f"  ✗ Generation failed: {e}")
+
+
 def run(args: argparse.Namespace) -> None:
     """Run the init wizard."""
     non_interactive = getattr(args, "non_interactive", False)
@@ -444,6 +513,16 @@ def run(args: argparse.Namespace) -> None:
         _log(f"  ⚠ Workers still initializing after {elapsed // 60}m.")
         _log("  This is normal for first-time setup. Monitor progress at:")
         _log(f"  https://www.runpod.io/console/serverless/{endpoint_id}\n")
+
+    # ── Step 8: Example Generation (optional) ──
+    if not non_interactive and ready:
+        _log("─── Step 8: Try It Out ───────────────────────────────────────\n")
+        _log("  Want to test your setup with a quick image generation?")
+        _log("  This will download a small model (~3.5GB) and generate a portrait.\n")
+        try_example = _prompt("Run example? [Y/n]", default="Y")
+
+        if try_example.lower() not in ("n", "no"):
+            _run_example(api_key, endpoint_id)
 
     # ── Summary ──
     if not non_interactive:

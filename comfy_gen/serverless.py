@@ -70,6 +70,55 @@ def _detect_file_inputs(workflow: dict) -> dict[str, dict]:
     return file_inputs
 
 
+def _format_job_error(raw_error: str) -> str:
+    """Extract a human-readable error from the worker's raw error payload.
+
+    Worker errors arrive as a JSON string with error_type, error_message,
+    and error_traceback. The error_message itself may contain nested JSON
+    from ComfyUI's /prompt validation. This function unpacks all of that
+    into a concise, readable message.
+    """
+    # Try to parse as JSON (worker error envelope)
+    try:
+        err = json.loads(raw_error) if isinstance(raw_error, str) else raw_error
+    except (json.JSONDecodeError, ValueError):
+        return raw_error
+
+    if not isinstance(err, dict):
+        return str(raw_error)
+
+    msg = err.get("error_message", "")
+    if not msg:
+        return str(raw_error)
+
+    # Try to extract ComfyUI validation errors from the message
+    # Pattern: "... ComfyUI /prompt returned 400: {JSON}"
+    prompt_json_start = msg.find('{"error"')
+    if prompt_json_start == -1:
+        # No nested ComfyUI JSON — return the message up to first traceback
+        clean = msg.split("\n")[0] if "\n" in msg else msg
+        return clean
+
+    try:
+        comfy_err = json.loads(msg[prompt_json_start:])
+    except (json.JSONDecodeError, ValueError):
+        return msg.split("\n")[0]
+
+    # Build readable error from ComfyUI node_errors
+    node_errors = comfy_err.get("node_errors", {})
+    if not node_errors:
+        comfy_msg = comfy_err.get("error", {}).get("message", msg)
+        return f"ComfyUI error: {comfy_msg}"
+
+    lines = ["ComfyUI validation failed:"]
+    for node_id, info in node_errors.items():
+        class_type = info.get("class_type", "unknown")
+        for e in info.get("errors", []):
+            detail = e.get("details", e.get("message", "unknown error"))
+            lines.append(f"  Node {node_id} ({class_type}): {detail}")
+    return "\n".join(lines)
+
+
 def submit(
     workflow_path: str,
     file_inputs: dict[str, str] | None = None,
@@ -218,7 +267,7 @@ def submit(
 
         elif status == "FAILED":
             error_msg = resp.get("error", "Unknown error")
-            raise RuntimeError(f"Job failed: {error_msg}")
+            raise RuntimeError(_format_job_error(error_msg))
 
         elif status == "TIMED_OUT":
             raise RuntimeError(f"Job timed out on server after {elapsed}s")
@@ -279,7 +328,7 @@ def status(job_id: str, endpoint_id: str | None = None) -> dict[str, Any]:
         result["delay_seconds"] = resp.get("delayTime", 0) // 1000
         result["elapsed_seconds"] = resp.get("executionTime", 0) // 1000
     elif runpod_status == "FAILED":
-        result["error"] = resp.get("error", "Unknown error")
+        result["error"] = _format_job_error(resp.get("error", "Unknown error"))
 
     return result
 
