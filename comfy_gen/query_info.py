@@ -97,7 +97,8 @@ def submit_query(
 
             samplers = worker_output.get("samplers", [])
             schedulers = worker_output.get("schedulers", [])
-            output.log(f"Found {len(samplers)} samplers, {len(schedulers)} schedulers")
+            loras = worker_output.get("loras", [])
+            output.log(f"Found {len(samplers)} samplers, {len(schedulers)} schedulers, {len(loras)} loras")
             return worker_output
 
         elif status == "FAILED":

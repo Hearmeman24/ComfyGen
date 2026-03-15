@@ -453,16 +453,18 @@ def main() -> None:
     # info
     p_info = subparsers.add_parser(
         "info",
-        help="Query available samplers and schedulers from ComfyUI",
+        help="Query available samplers, schedulers, and LoRAs from the endpoint",
         description=(
-            "Query the remote ComfyUI instance for available samplers and schedulers.\n"
-            "Submits a lightweight job that hits ComfyUI's /object_info endpoint\n"
-            "and extracts the sampler/scheduler options from KSampler.\n"
+            "Query the remote ComfyUI instance for all dynamic configuration values.\n"
+            "Returns available samplers, schedulers, and installed LoRA models in a\n"
+            "single response. These are consolidated because they are dynamic options\n"
+            "that the BlockFlow UI needs to populate dropdowns and selectors.\n"
             "\n"
             "Output JSON fields:\n"
             "  ok                 true on success\n"
             "  samplers           Array of available sampler names\n"
             "  schedulers         Array of available scheduler names\n"
+            "  loras              Array of {filename, path, size_mb}\n"
             "  job_id             RunPod job ID\n"
             "\n"
             "Examples:\n"
