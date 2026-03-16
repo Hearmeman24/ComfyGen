@@ -72,7 +72,7 @@ def cmd_submit(args: argparse.Namespace) -> None:
         endpoint_id=getattr(args, "endpoint_id", None),
     )
     print(json.dumps(result))
-    sys.exit(0)
+    sys.exit(1 if not result.get("ok", True) else 0)
 
 
 def cmd_status(args: argparse.Namespace) -> None:
