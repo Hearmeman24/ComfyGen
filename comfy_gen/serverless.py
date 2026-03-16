@@ -302,11 +302,13 @@ def submit(
             worker_output["delay_seconds"] = delay
             worker_output["elapsed_seconds"] = exec_time
 
-            # Handler returned an error (either {error: "..."} or {ok: false})
+            # Handler returned an error
+            if "error_message" in worker_output:
+                raise RuntimeError(worker_output["error_message"])
             if "error" in worker_output:
                 raise RuntimeError(worker_output["error"])
             if not worker_output.get("ok", True):
-                raise RuntimeError(worker_output.get("error", "Unknown error"))
+                raise RuntimeError(worker_output.get("error_message", "Unknown error"))
 
             url = worker_output.get("output", {}).get("url", "")
             ext = url.rsplit(".", 1)[-1].lower() if url else ""

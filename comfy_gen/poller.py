@@ -70,6 +70,13 @@ def poll_job(
             exec_time = resp.get("executionTime", 0) // 1000
             if exec_time:
                 worker_output["elapsed_seconds"] = exec_time
+
+            # Detect handler errors
+            if "error_message" in worker_output:
+                raise RuntimeError(worker_output["error_message"])
+            if "error" in worker_output:
+                raise RuntimeError(worker_output["error"])
+
             return worker_output
 
         elif status == "FAILED":
