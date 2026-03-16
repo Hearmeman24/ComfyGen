@@ -1,12 +1,11 @@
-"""Query ComfyUI for available samplers and schedulers via a serverless job."""
+"""Query ComfyUI for available samplers, schedulers, and LoRAs via a serverless job."""
 
 import json
-import time
 import urllib.error
 import urllib.request
 from typing import Any
 
-from comfy_gen import output
+from comfy_gen import output, poller
 
 
 def submit_query(
@@ -22,7 +21,7 @@ def submit_query(
         endpoint_id: Override endpoint ID from config.
 
     Returns:
-        Result dict with samplers and schedulers from the worker.
+        Result dict with samplers, schedulers, and loras from the worker.
     """
     from comfy_gen import config
 
@@ -71,47 +70,16 @@ def submit_query(
 
     output.log(f"Job submitted: {job_id}")
 
-    # Poll for completion
-    status_url = f"https://api.runpod.ai/v2/{endpoint_id}/status/{job_id}"
-    elapsed = 0
-    status = "UNKNOWN"
+    result = poller.poll_job(
+        job_id=job_id,
+        endpoint_id=endpoint_id,
+        api_key=api_key,
+        timeout=timeout,
+        poll_interval=poll_interval,
+    )
 
-    while elapsed < timeout:
-        time.sleep(poll_interval)
-        elapsed += poll_interval
-
-        req = urllib.request.Request(
-            status_url,
-            headers={"Authorization": f"Bearer {api_key}"},
-        )
-        try:
-            resp = json.loads(urllib.request.urlopen(req).read())
-        except Exception:
-            continue
-
-        status = resp.get("status", "UNKNOWN")
-
-        if status == "COMPLETED":
-            worker_output = resp.get("output", {})
-            worker_output["job_id"] = job_id
-
-            samplers = worker_output.get("samplers", [])
-            schedulers = worker_output.get("schedulers", [])
-            loras = worker_output.get("loras", [])
-            output.log(f"Found {len(samplers)} samplers, {len(schedulers)} schedulers, {len(loras)} loras")
-            return worker_output
-
-        elif status == "FAILED":
-            error_msg = resp.get("error", "Unknown error")
-            raise RuntimeError(f"Query job failed: {error_msg}")
-
-        elif status == "TIMED_OUT":
-            raise RuntimeError("Query job timed out on server")
-
-        elif status == "CANCELLED":
-            raise RuntimeError("Query job was cancelled")
-
-        else:
-            output.log(f"[{elapsed}s] {status}")
-
-    raise TimeoutError(f"Query did not complete within {timeout}s (last status: {status})")
+    samplers = result.get("samplers", [])
+    schedulers = result.get("schedulers", [])
+    loras = result.get("loras", [])
+    output.log(f"Found {len(samplers)} samplers, {len(schedulers)} schedulers, {len(loras)} loras")
+    return result

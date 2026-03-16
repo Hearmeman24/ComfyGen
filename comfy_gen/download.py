@@ -2,12 +2,11 @@
 
 import json
 import os
-import time
 import urllib.error
 import urllib.request
 from typing import Any
 
-from comfy_gen import output
+from comfy_gen import output, poller
 
 
 def submit_download(
@@ -88,60 +87,28 @@ def submit_download(
 
     output.log(f"Job submitted: {job_id}")
 
-    # Poll for completion
-    status_url = f"https://api.runpod.ai/v2/{endpoint_id}/status/{job_id}"
-    elapsed = 0
-    status = "UNKNOWN"
-
-    while elapsed < timeout:
-        time.sleep(poll_interval)
-        elapsed += poll_interval
-
-        req = urllib.request.Request(
-            status_url,
-            headers={"Authorization": f"Bearer {api_key}"},
-        )
-        try:
-            resp = json.loads(urllib.request.urlopen(req).read())
-        except Exception:
-            continue
-
-        status = resp.get("status", "UNKNOWN")
-
-        if status == "COMPLETED":
-            worker_output = resp.get("output", {})
-            exec_time = resp.get("executionTime", 0) // 1000
-            worker_output["job_id"] = job_id
-            worker_output["elapsed_seconds"] = exec_time
-
-            files = worker_output.get("files", [])
-            output.log(f"Download complete: {len(files)} file(s) in {exec_time}s")
-            for f in files:
-                output.log(f"  {f.get('filename', '?')} ({f.get('size_mb', '?')} MB) -> {f.get('dest', '?')}")
-            return worker_output
-
-        elif status == "FAILED":
-            error_msg = resp.get("error", "Unknown error")
-            raise RuntimeError(f"Download job failed: {error_msg}")
-
-        elif status == "TIMED_OUT":
-            raise RuntimeError(f"Download job timed out on server")
-
-        elif status == "CANCELLED":
-            raise RuntimeError("Download job was cancelled")
-
-        # Show progress
-        if status == "IN_PROGRESS":
-            prog = resp.get("output", {})
-            msg = prog.get("message", "")
-            pct = prog.get("percent")
-            if msg and pct is not None:
-                output.log(f"[{elapsed}s] {msg} ({pct:.0f}%)")
-            elif msg:
-                output.log(f"[{elapsed}s] {msg}")
-            else:
-                output.log(f"[{elapsed}s] {status}")
+    def _progress(elapsed, status, prog):
+        msg = prog.get("message", "")
+        pct = prog.get("percent")
+        if msg and pct is not None:
+            output.log(f"[{elapsed}s] {msg} ({pct:.0f}%)")
+        elif msg:
+            output.log(f"[{elapsed}s] {msg}")
         else:
             output.log(f"[{elapsed}s] {status}")
 
-    raise TimeoutError(f"Download did not complete within {timeout}s (last status: {status})")
+    result = poller.poll_job(
+        job_id=job_id,
+        endpoint_id=endpoint_id,
+        api_key=api_key,
+        timeout=timeout,
+        poll_interval=poll_interval,
+        progress_fn=_progress,
+    )
+
+    files = result.get("files", [])
+    exec_time = result.get("elapsed_seconds", 0)
+    output.log(f"Download complete: {len(files)} file(s) in {exec_time}s")
+    for f in files:
+        output.log(f"  {f.get('filename', '?')} ({f.get('size_mb', '?')} MB) -> {f.get('dest', '?')}")
+    return result

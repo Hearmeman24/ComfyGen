@@ -1,12 +1,11 @@
 """List model files on the RunPod network volume via a serverless job."""
 
 import json
-import time
 import urllib.error
 import urllib.request
 from typing import Any
 
-from comfy_gen import output
+from comfy_gen import output, poller
 
 
 def submit_list(
@@ -74,47 +73,16 @@ def submit_list(
 
     output.log(f"Job submitted: {job_id}")
 
-    # Poll for completion
-    status_url = f"https://api.runpod.ai/v2/{endpoint_id}/status/{job_id}"
-    elapsed = 0
-    status = "UNKNOWN"
+    result = poller.poll_job(
+        job_id=job_id,
+        endpoint_id=endpoint_id,
+        api_key=api_key,
+        timeout=timeout,
+        poll_interval=poll_interval,
+    )
 
-    while elapsed < timeout:
-        time.sleep(poll_interval)
-        elapsed += poll_interval
-
-        req = urllib.request.Request(
-            status_url,
-            headers={"Authorization": f"Bearer {api_key}"},
-        )
-        try:
-            resp = json.loads(urllib.request.urlopen(req).read())
-        except Exception:
-            continue
-
-        status = resp.get("status", "UNKNOWN")
-
-        if status == "COMPLETED":
-            worker_output = resp.get("output", {})
-            worker_output["job_id"] = job_id
-
-            files = worker_output.get("files", [])
-            output.log(f"Found {len(files)} {model_type} file(s)")
-            for f in files:
-                output.log(f"  {f.get('filename', '?')} ({f.get('size_mb', '?')} MB)")
-            return worker_output
-
-        elif status == "FAILED":
-            error_msg = resp.get("error", "Unknown error")
-            raise RuntimeError(f"List job failed: {error_msg}")
-
-        elif status == "TIMED_OUT":
-            raise RuntimeError("List job timed out on server")
-
-        elif status == "CANCELLED":
-            raise RuntimeError("List job was cancelled")
-
-        else:
-            output.log(f"[{elapsed}s] {status}")
-
-    raise TimeoutError(f"List did not complete within {timeout}s (last status: {status})")
+    files = result.get("files", [])
+    output.log(f"Found {len(files)} {model_type} file(s)")
+    for f in files:
+        output.log(f"  {f.get('filename', '?')} ({f.get('size_mb', '?')} MB)")
+    return result
