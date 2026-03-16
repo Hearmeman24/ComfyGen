@@ -70,53 +70,100 @@ def _detect_file_inputs(workflow: dict) -> dict[str, dict]:
     return file_inputs
 
 
+def _format_comfy_errors(comfy_err: dict) -> str:
+    """Format a parsed ComfyUI error JSON into a readable message."""
+    err_type = comfy_err.get("error", {}).get("type", "")
+    err_msg = comfy_err.get("error", {}).get("message", "")
+    extra = comfy_err.get("error", {}).get("extra_info", {})
+    node_errors = comfy_err.get("node_errors", {})
+
+    # Missing custom node
+    if err_type == "missing_node_type":
+        node_title = extra.get("node_title", "")
+        class_type = extra.get("class_type", "")
+        return f"Missing custom node: {node_title or class_type}"
+
+    # Validation errors with per-node details
+    if node_errors:
+        lines = ["Workflow validation failed:"]
+        for node_id, info in node_errors.items():
+            class_type = info.get("class_type", node_id)
+            for e in info.get("errors", []):
+                details = e.get("details", e.get("message", "unknown error"))
+                # The details string can be very long with full model lists.
+                # Extract just the key info: what's missing and from which input.
+                input_name = e.get("extra_info", {}).get("input_name", "")
+                received = e.get("extra_info", {}).get("received_value", "")
+                if input_name and received:
+                    lines.append(f"  Node {node_id} ({class_type}): '{received}' not found for input '{input_name}'")
+                else:
+                    # Truncate long details
+                    if len(details) > 200:
+                        details = details[:200] + "..."
+                    lines.append(f"  Node {node_id} ({class_type}): {details}")
+        return "\n".join(lines)
+
+    # Generic ComfyUI error
+    if err_msg:
+        return f"ComfyUI error: {err_msg}"
+
+    return str(comfy_err)
+
+
 def _format_job_error(raw_error: str) -> str:
     """Extract a human-readable error from the worker's raw error payload.
 
-    Worker errors arrive as a JSON string with error_type, error_message,
-    and error_traceback. The error_message itself may contain nested JSON
-    from ComfyUI's /prompt validation. This function unpacks all of that
-    into a concise, readable message.
+    Handles multiple formats:
+    - New: clean message from _clean_error (already readable)
+    - Old: JSON envelope with error_type/error_message/error_traceback
+    - Raw: ComfyUI JSON embedded in error string
     """
-    # Try to parse as JSON (worker error envelope)
+    if not raw_error:
+        return "Unknown error"
+
+    # Try to parse as JSON
     try:
         err = json.loads(raw_error) if isinstance(raw_error, str) else raw_error
     except (json.JSONDecodeError, ValueError):
-        return raw_error
+        err = None
 
-    if not isinstance(err, dict):
-        return str(raw_error)
+    # Case 1: Worker error envelope {error_type, error_message, error_traceback}
+    if isinstance(err, dict) and "error_message" in err:
+        msg = err["error_message"]
+    elif isinstance(err, dict):
+        # Could be a ComfyUI error directly
+        if "error" in err and "node_errors" in err:
+            return _format_comfy_errors(err)
+        msg = str(raw_error)
+    else:
+        msg = str(raw_error)
 
-    msg = err.get("error_message", "")
-    if not msg:
-        return str(raw_error)
+    # Try to find embedded ComfyUI JSON in the message
+    json_start = msg.find('{"error"')
+    if json_start != -1:
+        try:
+            comfy_err = json.loads(msg[json_start:])
+            return _format_comfy_errors(comfy_err)
+        except (json.JSONDecodeError, ValueError):
+            pass
 
-    # Try to extract ComfyUI validation errors from the message
-    # Pattern: "... ComfyUI /prompt returned 400: {JSON}"
-    prompt_json_start = msg.find('{"error"')
-    if prompt_json_start == -1:
-        # No nested ComfyUI JSON — return the message up to first traceback
-        clean = msg.split("\n")[0] if "\n" in msg else msg
-        return clean
+    # Strip traceback noise — return first meaningful line
+    # Remove "Job failed after Ns: " prefix
+    if "Job failed after" in msg:
+        idx = msg.find(": ")
+        if idx != -1:
+            msg = msg[idx + 2:]
 
-    try:
-        comfy_err = json.loads(msg[prompt_json_start:])
-    except (json.JSONDecodeError, ValueError):
-        return msg.split("\n")[0]
+    # Remove "ComfyUI /prompt returned 400: " prefix if no JSON follows
+    if "ComfyUI /prompt returned" in msg:
+        idx = msg.find(": ")
+        if idx != -1:
+            remainder = msg[idx + 2:]
+            if not remainder.startswith("{"):
+                msg = remainder
 
-    # Build readable error from ComfyUI node_errors
-    node_errors = comfy_err.get("node_errors", {})
-    if not node_errors:
-        comfy_msg = comfy_err.get("error", {}).get("message", msg)
-        return f"ComfyUI error: {comfy_msg}"
-
-    lines = ["ComfyUI validation failed:"]
-    for node_id, info in node_errors.items():
-        class_type = info.get("class_type", "unknown")
-        for e in info.get("errors", []):
-            detail = e.get("details", e.get("message", "unknown error"))
-            lines.append(f"  Node {node_id} ({class_type}): {detail}")
-    return "\n".join(lines)
+    clean = msg.split("\n")[0] if "\n" in msg else msg
+    return clean
 
 
 def submit(
