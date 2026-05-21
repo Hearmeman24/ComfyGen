@@ -23,5 +23,15 @@ classifiers = [
 [project.scripts]
 comfy-gen = "comfy_gen.cli:main"
 
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-mock>=3.12",
+]
+
 [tool.setuptools.packages.find]
 include = ["comfy_gen*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["serverless-runtime"]
