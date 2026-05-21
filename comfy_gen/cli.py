@@ -121,6 +121,29 @@ def cmd_download(args: argparse.Namespace) -> None:
     sys.exit(0)
 
 
+def cmd_hash(args: argparse.Namespace) -> None:
+    from comfy_gen import hash_files
+
+    paths: list[str] = []
+    if args.batch:
+        with open(args.batch) as f:
+            paths = json.load(f)
+        if not isinstance(paths, list) or not all(isinstance(p, str) for p in paths):
+            output.error("Batch file must contain a JSON array of path strings")
+    else:
+        paths = list(args.paths or [])
+        if not paths:
+            output.error("Usage: comfy-gen hash <path>...\n  Or:  comfy-gen hash --batch <file.json>")
+
+    result = hash_files.submit_hash(
+        paths=paths,
+        timeout=args.timeout or 300,
+        endpoint_id=getattr(args, "endpoint_id", None),
+    )
+    print(json.dumps(result))
+    sys.exit(0)
+
+
 def cmd_list(args: argparse.Namespace) -> None:
     from comfy_gen import list_models
 
@@ -391,6 +414,49 @@ def main() -> None:
     )
     p_download.add_argument("--endpoint-id", metavar="ID", help="RunPod endpoint ID (overrides config)")
 
+    # hash
+    p_hash = subparsers.add_parser(
+        "hash",
+        help="SHA256 + size for files already on the network volume",
+        description=(
+            "Compute sha256 + size for one or more files already on the RunPod\n"
+            "network volume. Submit paths and the worker streams the hash of\n"
+            "each file (in 64 KiB chunks) and returns per-path results.\n"
+            "\n"
+            "Use this to decide whether to skip a download — pair the result\n"
+            "with `comfy-gen download`'s sha256-based dedup so a file that\n"
+            "already matches the expected hash is not re-fetched.\n"
+            "\n"
+            "Security: paths are resolved via realpath on the worker; any\n"
+            "path that doesn't resolve under /runpod-volume is rejected per-\n"
+            "path (the batch still completes with an error entry).\n"
+            "\n"
+            "Output JSON fields:\n"
+            "  ok                 true if the batch ran (per-file errors are\n"
+            "                     non-fatal and surface in files[].error)\n"
+            "  files              Array of:\n"
+            "                       {path, sha256, bytes}            on success\n"
+            "                       {path, sha256: null, error: ...} on failure\n"
+            "                       per-path errors: 'not found',\n"
+            "                       'not a file', 'path outside /runpod-volume'\n"
+            "\n"
+            "Examples:\n"
+            "  comfy-gen hash /runpod-volume/ComfyUI/models/loras/my.safetensors\n"
+            "  comfy-gen hash /rv/.../a.safetensors /rv/.../b.safetensors\n"
+            "  comfy-gen hash --batch paths.json   # paths.json: [\"/path/a\", ...]\n"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p_hash.add_argument("paths", nargs="*", help="Absolute path(s) under /runpod-volume to hash")
+    p_hash.add_argument(
+        "--batch", metavar="FILE",
+        help="Path to JSON file with array of path strings (overrides positional args)",
+    )
+    p_hash.add_argument(
+        "--timeout", type=int, help="Max seconds to wait for completion (default: 300)",
+    )
+    p_hash.add_argument("--endpoint-id", metavar="ID", help="RunPod endpoint ID (overrides config)")
+
     # cancel
     p_cancel = subparsers.add_parser(
         "cancel",
@@ -486,6 +552,7 @@ def main() -> None:
             "config": cmd_config,
             "submit": cmd_submit,
             "download": cmd_download,
+            "hash": cmd_hash,
             "status": cmd_status,
             "cancel": cmd_cancel,
             "list": cmd_list,

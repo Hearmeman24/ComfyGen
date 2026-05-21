@@ -40,6 +40,9 @@ def dispatch_command():
         if command == "volume_info":
             import volume_info_handler
             return volume_info_handler.handle(job)
+        if command == "hash":
+            import hash_handler
+            return hash_handler.handle(job)
         raise ValueError(f"unknown command: {command!r}")
 
     return _dispatch
