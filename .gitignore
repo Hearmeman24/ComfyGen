@@ -14,3 +14,9 @@ serverless-docker/
 serverless-runtime/
 AGENTS.md
 CLAUDE.md
+docs/brain/
+
+# Beads / Dolt files (added by bd init)
+.dolt/
+*.db
+.beads-credential-key
