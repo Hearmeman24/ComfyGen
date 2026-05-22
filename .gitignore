@@ -5,7 +5,10 @@ __pycache__/
 dist/
 build/
 output/
-automation/
+automation/*
+# CI scripts fetched by serverless-docker's CircleCI workflow — track them.
+!automation/smoke_preset.py
+!automation/wait_for_rollout.py
 wan_animate_test/
 architecture.md
 issues.md
