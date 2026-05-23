@@ -102,8 +102,15 @@ def run_cli(cmd: list[str], step: str) -> dict:
     print(f"[smoke] {step}: {' '.join(cmd)}", file=sys.stderr, flush=True)
     proc = subprocess.run(cmd, capture_output=True, text=True, timeout=7200)
     if proc.returncode != 0:
-        tail = (proc.stderr or proc.stdout or "")[-2000:]
-        raise RuntimeError(f"{step} failed (exit {proc.returncode}):\n{tail}")
+        # comfy-gen writes error JSON to stdout (output.error()) and progress
+        # to stderr (output.log()). Show both so the actual failure surfaces.
+        stdout_tail = (proc.stdout or "")[-1500:]
+        stderr_tail = (proc.stderr or "")[-500:]
+        raise RuntimeError(
+            f"{step} failed (exit {proc.returncode}):\n"
+            f"--- stdout tail ---\n{stdout_tail}\n"
+            f"--- stderr tail ---\n{stderr_tail}"
+        )
     if not proc.stdout.strip():
         raise RuntimeError(f"{step} produced no stdout. stderr tail:\n{(proc.stderr or '')[-1000:]}")
     try:
