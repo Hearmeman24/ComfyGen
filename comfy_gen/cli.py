@@ -144,6 +144,19 @@ def cmd_delete(args: argparse.Namespace) -> None:
     sys.exit(0)
 
 
+def cmd_object_info(args: argparse.Namespace) -> None:
+    from comfy_gen import object_info
+
+    class_types: list[str] = list(args.classes or [])
+    result = object_info.submit_object_info(
+        class_types=class_types or None,
+        timeout=args.timeout or 120,
+        endpoint_id=getattr(args, "endpoint_id", None),
+    )
+    print(json.dumps(result))
+    sys.exit(0)
+
+
 def cmd_hash(args: argparse.Namespace) -> None:
     from comfy_gen import hash_files
 
@@ -478,6 +491,47 @@ def main() -> None:
     )
     p_delete.add_argument("--endpoint-id", metavar="ID", help="RunPod endpoint ID (overrides config)")
 
+    # object-info
+    p_object_info = subparsers.add_parser(
+        "object-info",
+        help="Introspect ComfyUI node classes (INPUT_TYPES, output spec)",
+        description=(
+            "Query the remote ComfyUI's /object_info for one or more node\n"
+            "classes — returns each class's accepted required/optional inputs\n"
+            "(including dropdown enums) and output spec.\n"
+            "\n"
+            "Useful for diagnosing 'Value not in list' or 'Required input is\n"
+            "missing' errors: hit the live endpoint to see exactly what the\n"
+            "currently-deployed node version accepts. Pair with the smoke\n"
+            "gate's pre-flight validator (automation/validate_workflow.py)\n"
+            "for batch workflow validation.\n"
+            "\n"
+            "Pass class names as positional args; omit to get every installed\n"
+            "class (large payload — ComfyUI usually registers 200+).\n"
+            "\n"
+            "Output JSON fields:\n"
+            "  ok                 true if the call succeeded\n"
+            "  classes            Object keyed by class_type; each value is the\n"
+            "                     raw ComfyUI INPUT_TYPES shape:\n"
+            "                       {input: {required, optional}, output, output_name, ...}\n"
+            "  job_id             RunPod job ID\n"
+            "\n"
+            "Examples:\n"
+            "  comfy-gen object-info KSampler\n"
+            "  comfy-gen object-info OnnxDetectionModelLoader OpenRouterNode\n"
+            "  comfy-gen object-info               # ⚠ returns ALL ~200+ classes\n"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p_object_info.add_argument(
+        "classes", nargs="*",
+        help="Node class names to fetch (omit for all installed classes)",
+    )
+    p_object_info.add_argument(
+        "--timeout", type=int, help="Max seconds to wait for completion (default: 120)",
+    )
+    p_object_info.add_argument("--endpoint-id", metavar="ID", help="RunPod endpoint ID (overrides config)")
+
     # hash
     p_hash = subparsers.add_parser(
         "hash",
@@ -618,6 +672,7 @@ def main() -> None:
             "download": cmd_download,
             "delete": cmd_delete,
             "hash": cmd_hash,
+            "object-info": cmd_object_info,
             "status": cmd_status,
             "cancel": cmd_cancel,
             "list": cmd_list,
