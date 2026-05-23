@@ -43,6 +43,9 @@ def dispatch_command():
         if command == "hash":
             import hash_handler
             return hash_handler.handle(job)
+        if command == "list_models":
+            import list_handler
+            return list_handler.handle(job)
         raise ValueError(f"unknown command: {command!r}")
 
     return _dispatch
