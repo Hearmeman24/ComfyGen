@@ -72,6 +72,9 @@ def _http(method: str, url: str, *, headers: dict | None = None,
         return resp.status, None
 
 
+DEFAULT_CPU_INSTANCE_IDS = ["cpu3c-2-4", "cpu5c-2-4", "cpu3g-2-8", "cpu5g-2-8"]
+
+
 def spawn_installer_pod(
     api_key: str,
     image: str,
@@ -79,56 +82,99 @@ def spawn_installer_pod(
     token: str,
     name: str = "comfygen-installer",
     port: int = DEFAULT_PORT,
-    cpu_flavor_ids: list[str] | None = None,
-    vcpu_count: int = 2,
+    cpu_instance_ids: list[str] | None = None,
+    container_disk_gb: int = 5,
     runtime_repo_ref: str | None = None,
 ) -> dict:
-    """POST /v1/pods to create a CPU pod with installer_server running.
+    """Spawn a CPU installer pod via the GraphQL deployCpuPod mutation.
 
-    Returns the parsed JSON from RunPod, which must include `id`. Raises
-    RuntimeError on a non-2xx response.
+    REST /v1/pods and GraphQL podFindAndDeployOnDemand both refuse a
+    gpuCount of 0 (the former 400s on the schema, the latter raises
+    'gpuTypeId is required'). deployCpuPod is the only path that
+    actually produces a CPU machine — saw $0.06/hr vs $3.29/hr for the
+    accidentally-spawned H100 fallback.
+
+    Tries each instance id in order; first one that doesn't 'no instance
+    available' wins. Raises if all are exhausted.
     """
     env: dict[str, str] = {"INSTALLER_TOKEN": token, "RUNPOD_API_KEY": api_key}
     if runtime_repo_ref:
         env["RUNTIME_REPO_REF"] = runtime_repo_ref
-    body = {
-        "name": name,
-        "imageName": image,
-        "containerDiskInGb": 5,
-        "volumeMountPath": "/workspace",
-        "networkVolumeId": volume_id,
-        "ports": [f"{port}/http"],
-        "cpuFlavorIds": cpu_flavor_ids or ["cpu5c", "cpu3c", "cpu5g", "cpu3g"],
-        "vcpuCount": vcpu_count,
-        # Explicit gpuTypeIds: [] forbids the API's silent fallback-to-GPU
-        # behavior we observed when every CPU flavor was out of capacity —
-        # it spawned an H100 SXM at $3.29/hr instead of failing.
-        "gpuTypeIds": [],
-        "gpuCount": 0,
-        "env": env,
-    }
-    status, payload = _http(
-        "POST", "https://rest.runpod.io/v1/pods",
-        headers={"Authorization": f"Bearer {api_key}"},
-        body=body,
-    )
-    if status >= 300 or not payload or "id" not in payload:
-        raise RuntimeError(f"pod spawn failed ({status}): {payload}")
 
-    # Belt-and-suspenders: even with gpuTypeIds:[], verify the spawned pod
-    # has no GPU. If it does (API ignored our hint), DELETE immediately and
-    # raise — better a noisy failure than a silent $3+/hr meter.
-    pod_id = payload["id"]
-    gpu_count = payload.get("gpuCount") or 0
-    if gpu_count > 0 or payload.get("gpuTypeId"):
-        delete_pod(api_key, pod_id)
-        raise RuntimeError(
-            f"pod {pod_id} spawned with GPU (gpuCount={gpu_count}, "
-            f"gpuTypeId={payload.get('gpuTypeId')!r}) despite gpuTypeIds=[]; "
-            f"deleted to stop billing. Likely cause: no CPU capacity in any "
-            f"requested cpuFlavorIds. Retry later or request specific flavors."
+    def _esc(s: str) -> str:
+        return s.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+
+    env_entries = ", ".join(
+        f'{{ key: "{_esc(k)}", value: "{_esc(v)}" }}' for k, v in env.items()
+    )
+    ports_str = f"{port}/http"
+    candidates = cpu_instance_ids or DEFAULT_CPU_INSTANCE_IDS
+
+    last_err: str | None = None
+    for instance_id in candidates:
+        query = f"""
+        mutation {{
+          deployCpuPod(input: {{
+            cloudType: COMMUNITY,
+            instanceId: "{_esc(instance_id)}",
+            containerDiskInGb: {container_disk_gb},
+            volumeMountPath: "/workspace",
+            networkVolumeId: "{_esc(volume_id)}",
+            name: "{_esc(name)}",
+            imageName: "{_esc(image)}",
+            ports: "{ports_str}",
+            env: [{env_entries}]
+          }}) {{
+            id
+            machineId
+            costPerHr
+            machine {{ gpuTypeId podHostId }}
+          }}
+        }}
+        """
+        req = urllib.request.Request(
+            "https://api.runpod.io/graphql",
+            data=json.dumps({"query": query}).encode(),
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+                "User-Agent": "comfy-gen/0.2",
+            },
         )
-    return payload
+        try:
+            resp_raw = urllib.request.urlopen(req, timeout=60).read()
+        except urllib.error.HTTPError as exc:
+            last_err = f"HTTP {exc.code}: {exc.read().decode(errors='replace')[:300]}"
+            continue
+        resp = json.loads(resp_raw)
+        if "errors" in resp:
+            last_err = f"instance {instance_id}: {resp['errors']}"
+            # capacity errors → try next; everything else → fail loudly
+            err_text = json.dumps(resp["errors"])
+            if "no longer any instances available" in err_text or "no instances available" in err_text:
+                continue
+            raise RuntimeError(f"GraphQL error: {resp['errors']}")
+        pod = (resp.get("data") or {}).get("deployCpuPod")
+        if not pod or "id" not in pod:
+            last_err = f"instance {instance_id}: no id in response: {resp}"
+            continue
+
+        # deployCpuPod is CPU-only by construction; we trust it. As a final
+        # belt: if costPerHr is reported and looks GPU-priced ($1+/hr),
+        # abort. CPU pods we've observed: $0.06/hr (cpu3c-2-4).
+        cost = pod.get("costPerHr")
+        if isinstance(cost, (int, float)) and cost >= 1.0:
+            delete_pod(api_key, pod["id"])
+            raise RuntimeError(
+                f"pod {pod['id']} has costPerHr={cost}, looks like GPU "
+                f"pricing; deleted to stop billing."
+            )
+        return pod
+
+    raise RuntimeError(
+        f"pod spawn failed — no CPU instance available for any of "
+        f"{candidates}; last={last_err}"
+    )
 
 
 def delete_pod(api_key: str, pod_id: str) -> None:
@@ -140,17 +186,29 @@ def delete_pod(api_key: str, pod_id: str) -> None:
 
 
 def wait_for_health(pod_id: str, port: int, timeout_sec: int) -> None:
-    """Poll /health until 200/{ok:true} or timeout. Raises on timeout."""
+    """Poll /health until 200/{ok:true} TWICE consecutively or timeout.
+
+    Two-200 gate: RunPod's HTTP proxy can serve a GET /health 200 ~seconds
+    before POST routing to the same pod is stable — observed live, a single
+    /health 200 followed by immediate POST /install hit 404. A second 200
+    one poll-interval later is a cheap proof that the proxy is fully wired.
+    """
     deadline = time.monotonic() + timeout_sec
     url = f"{_proxy_url(pod_id, port)}/health"
+    consecutive_ok = 0
     last_err: str | None = None
     while time.monotonic() < deadline:
         try:
             status, payload = _http("GET", url, timeout=5)
             if status == 200 and payload and payload.get("ok"):
-                return
-            last_err = f"status={status} payload={payload}"
+                consecutive_ok += 1
+                if consecutive_ok >= 2:
+                    return
+            else:
+                consecutive_ok = 0
+                last_err = f"status={status} payload={payload}"
         except Exception as exc:  # noqa: BLE001
+            consecutive_ok = 0
             last_err = f"{type(exc).__name__}: {exc}"
         time.sleep(HEALTH_POLL_INTERVAL_SEC)
     raise RuntimeError(f"pod {pod_id} not healthy after {timeout_sec}s; last={last_err}")
