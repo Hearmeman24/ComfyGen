@@ -40,11 +40,19 @@ def _proxy_url(pod_id: str, port: int) -> str:
 
 def _http(method: str, url: str, *, headers: dict | None = None,
           body: dict | None = None, timeout: float = 30) -> tuple[int, dict | None]:
-    """Generic HTTP call returning (status, parsed_json_or_None)."""
+    """Generic HTTP call returning (status, parsed_json_or_None).
+
+    Sets User-Agent: comfy-gen/<ver> because RunPod's HTTP proxy returns 403
+    to the default `Python-urllib/3.x` UA — curl works but urllib doesn't.
+    """
     data = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(
         url, data=data,
-        headers={"Content-Type": "application/json", **(headers or {})},
+        headers={
+            "Content-Type": "application/json",
+            "User-Agent": "comfy-gen/0.2",
+            **(headers or {}),
+        },
         method=method,
     )
     try:
@@ -92,6 +100,11 @@ def spawn_installer_pod(
         "ports": [f"{port}/http"],
         "cpuFlavorIds": cpu_flavor_ids or ["cpu5c", "cpu3c", "cpu5g", "cpu3g"],
         "vcpuCount": vcpu_count,
+        # Explicit gpuTypeIds: [] forbids the API's silent fallback-to-GPU
+        # behavior we observed when every CPU flavor was out of capacity —
+        # it spawned an H100 SXM at $3.29/hr instead of failing.
+        "gpuTypeIds": [],
+        "gpuCount": 0,
         "env": env,
     }
     status, payload = _http(
@@ -101,6 +114,20 @@ def spawn_installer_pod(
     )
     if status >= 300 or not payload or "id" not in payload:
         raise RuntimeError(f"pod spawn failed ({status}): {payload}")
+
+    # Belt-and-suspenders: even with gpuTypeIds:[], verify the spawned pod
+    # has no GPU. If it does (API ignored our hint), DELETE immediately and
+    # raise — better a noisy failure than a silent $3+/hr meter.
+    pod_id = payload["id"]
+    gpu_count = payload.get("gpuCount") or 0
+    if gpu_count > 0 or payload.get("gpuTypeId"):
+        delete_pod(api_key, pod_id)
+        raise RuntimeError(
+            f"pod {pod_id} spawned with GPU (gpuCount={gpu_count}, "
+            f"gpuTypeId={payload.get('gpuTypeId')!r}) despite gpuTypeIds=[]; "
+            f"deleted to stop billing. Likely cause: no CPU capacity in any "
+            f"requested cpuFlavorIds. Retry later or request specific flavors."
+        )
     return payload
 
 
@@ -144,6 +171,7 @@ def stream_install(pod_id: str, port: int, token: str, preset_id: str,
         headers={
             "Content-Type": "application/json",
             "Accept": "text/event-stream",
+            "User-Agent": "comfy-gen/0.2",
             "X-Installer-Token": token,
         },
         method="POST",
@@ -193,7 +221,10 @@ def run(
             raise RuntimeError("--volume-id required when spawning a new pod")
         if not api_key:
             raise RuntimeError("runpod_api_key not configured")
-        pod_token = pod_token or secrets.token_urlsafe(24)
+        # token_hex (not token_urlsafe) — base64 URL alphabet includes `-`
+        # which can land in the first position and confuse argparse on the
+        # pod side when the entrypoint does `--token $TOKEN`.
+        pod_token = pod_token or secrets.token_hex(24)
         spawn_result = spawn_installer_pod(
             api_key=api_key, image=image, volume_id=volume_id,
             token=pod_token, port=port,
