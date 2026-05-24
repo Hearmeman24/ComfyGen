@@ -727,7 +727,7 @@ def main() -> None:
     )
     p_install.add_argument("--preset-id", required=True, help="Preset id from the BlockFlow preset registry manifest")
     p_install.add_argument("--volume-id", help="RunPod network volume id to attach (required for spawn)")
-    p_install.add_argument("--image", default="hearmeman/installer:v5", help="Installer image tag (default: installer:v5)")
+    p_install.add_argument("--image", default="hearmeman/comfyui-serverless:installer-v5", help="Installer image (default: hearmeman/comfyui-serverless:installer-v5)")
     p_install.add_argument("--port", type=int, default=3000, help="Pod port (default: 3000)")
     p_install.add_argument("--keep-alive", action="store_true", help="Skip the /shutdown call so the pod stays available for follow-up installs")
     p_install.add_argument("--health-timeout-sec", type=int, default=180, help="Max seconds to wait for the pod's /health to come up (default: 180)")
