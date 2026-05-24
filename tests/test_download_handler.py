@@ -295,3 +295,68 @@ def test_send_progress_is_noop_without_runpod_harness(monkeypatch):
         raise RuntimeError("no harness")
     monkeypatch.setattr(download_handler.runpod.serverless, "progress_update", boom)
     download_handler._send_progress({"id": "x"}, "msg", 50.0)  # must not raise
+
+
+# --- progress_callback hook (installer-server SSE bridge) ---
+#
+# The installer pod's aiohttp server (bead 5f2) needs structured events on a
+# callback instead of (or in addition to) runpod's harness progress_update.
+
+def test_progress_callback_receives_download_start_and_done(fake_aria2c, models_base):
+    events = []
+    download_handler.handle(
+        _job([
+            {"source": "url", "url": "https://example.com/m.safetensors",
+             "dest": "loras", "sha256": REAL_SHA},
+        ]),
+        progress_callback=events.append,
+    )
+    types = [e["type"] for e in events]
+    assert "download_start" in types, f"expected download_start; got {types}"
+    assert "download_done" in types, f"expected download_done; got {types}"
+    start = next(e for e in events if e["type"] == "download_start")
+    assert start["file_index"] == 0
+    assert start["file"] == "m.safetensors"
+    done = next(e for e in events if e["type"] == "download_done")
+    assert done["file_index"] == 0
+    assert done["cached"] is False
+    assert done["sha256"] == REAL_SHA
+
+
+def test_progress_callback_reports_cached_on_dedup_hit(fake_aria2c, models_base):
+    dest = models_base / "loras"
+    dest.mkdir()
+    (dest / "m.safetensors").write_bytes(REAL_BYTES)
+
+    events = []
+    download_handler.handle(
+        _job([
+            {"source": "url", "url": "https://example.com/m.safetensors",
+             "dest": "loras", "sha256": REAL_SHA},
+        ]),
+        progress_callback=events.append,
+    )
+    done = next(e for e in events if e["type"] == "download_done")
+    assert done["cached"] is True
+    assert done["sha256"] == REAL_SHA
+    assert fake_aria2c["calls"] == 0
+
+
+def test_progress_callback_omitted_keeps_legacy_behavior(fake_aria2c, models_base):
+    seen = []
+
+    def fake_progress(job, payload):
+        seen.append(payload)
+
+    original = download_handler.runpod.serverless.progress_update
+    download_handler.runpod.serverless.progress_update = fake_progress
+    try:
+        result = download_handler.handle(_job([
+            {"source": "url", "url": "https://example.com/m.safetensors",
+             "dest": "loras"},
+        ]))
+    finally:
+        download_handler.runpod.serverless.progress_update = original
+
+    assert result["ok"] is True
+    assert seen, "legacy progress_update path must still fire when no callback supplied"

@@ -75,6 +75,41 @@ def cmd_submit(args: argparse.Namespace) -> None:
     sys.exit(1 if not result.get("ok", True) else 0)
 
 
+def cmd_install_preset(args: argparse.Namespace) -> None:
+    from comfy_gen import install_preset
+
+    rc = install_preset.run(
+        preset_id=args.preset_id,
+        volume_id=args.volume_id,
+        pod_id=None,
+        token=None,
+        image=args.image,
+        port=args.port,
+        health_timeout_sec=args.health_timeout_sec,
+        keep_alive=args.keep_alive,
+        civitai_token=args.civitai_token,
+        hf_token=args.hf_token,
+        runtime_repo_ref=args.runtime_repo_ref,
+    )
+    sys.exit(rc)
+
+
+def cmd_install_call(args: argparse.Namespace) -> None:
+    from comfy_gen import install_preset
+
+    rc = install_preset.run(
+        preset_id=args.preset_id,
+        volume_id=None,
+        pod_id=args.pod_id,
+        token=args.token,
+        port=args.port,
+        keep_alive=args.keep_alive,
+        civitai_token=args.civitai_token,
+        hf_token=args.hf_token,
+    )
+    sys.exit(rc)
+
+
 def cmd_status(args: argparse.Namespace) -> None:
     from comfy_gen import serverless
 
@@ -662,6 +697,69 @@ def main() -> None:
     )
     p_info.add_argument("--endpoint-id", metavar="ID", help="RunPod endpoint ID (overrides config)")
 
+    # install-preset (bead 5f2)
+    p_install = subparsers.add_parser(
+        "install-preset",
+        help="Spawn a CPU installer pod and stream a BlockFlow preset install over SSE",
+        description=(
+            "Spawn a CPU installer pod, wait for /health, POST /install/<preset_id>, and\n"
+            "stream the server-sent-events response as line-delimited JSON to stdout. The\n"
+            "pod self-terminates on /shutdown unless --keep-alive is set.\n"
+            "\n"
+            "Each stdout line is one event:\n"
+            "  {\"type\": \"pod_spawned\", \"pod_id\", \"token\"}\n"
+            "  {\"type\": \"preflight_start\"}\n"
+            "  {\"type\": \"preflight_ok\", \"models_count\", \"total_bytes\", \"volume_free_bytes\"}\n"
+            "  {\"type\": \"preflight_fail\", \"reason\"}\n"
+            "  {\"type\": \"download_start\", \"file_index\", \"file\"}\n"
+            "  {\"type\": \"download_done\",  \"file_index\", \"file\", \"cached\", \"bytes\", \"sha256\"}\n"
+            "  {\"type\": \"install_done\",   \"ok\", \"files\", \"elapsed_sec\"}\n"
+            "  {\"type\": \"install_error\",  \"stage\", \"reason\"}\n"
+            "\n"
+            "Exit codes:\n"
+            "  0 — install_done.ok == true\n"
+            "  1 — install_error, preflight_fail, health timeout, or stream error\n"
+            "\n"
+            "Examples:\n"
+            "  comfy-gen install-preset --preset-id qwen-image-lighting --volume-id 7etzak7vfp\n"
+            "  comfy-gen install-preset --preset-id wan-video --volume-id <vid> --keep-alive\n"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p_install.add_argument("--preset-id", required=True, help="Preset id from the BlockFlow preset registry manifest")
+    p_install.add_argument("--volume-id", help="RunPod network volume id to attach (required for spawn)")
+    p_install.add_argument("--image", default="hearmeman/comfyui-serverless:installer-v5", help="Installer image (default: hearmeman/comfyui-serverless:installer-v5)")
+    p_install.add_argument("--port", type=int, default=3000, help="Pod port (default: 3000)")
+    p_install.add_argument("--keep-alive", action="store_true", help="Skip the /shutdown call so the pod stays available for follow-up installs")
+    p_install.add_argument("--health-timeout-sec", type=int, default=180, help="Max seconds to wait for the pod's /health to come up (default: 180)")
+    p_install.add_argument("--civitai-token", help="Optional CivitAI token forwarded to the worker via /install body")
+    p_install.add_argument("--hf-token", help="Optional HuggingFace token forwarded to the worker via /install body")
+    p_install.add_argument("--runtime-repo-ref", metavar="REF", help="Override RUNTIME_REPO_REF (git ref the pod clones at boot)")
+
+    # install-call (bead 5f2) — drive an existing pod without spawning
+    p_install_call = subparsers.add_parser(
+        "install-call",
+        help="Drive an existing installer pod's /install endpoint (no spawn)",
+        description=(
+            "Stream an install against a pod that's already running. Use this for\n"
+            "multi-op flows (install preset A, then B on the same pod) so you don't\n"
+            "pay another cold start.\n"
+            "\n"
+            "Same stdout shape and exit codes as `install-preset`.\n"
+            "\n"
+            "Examples:\n"
+            "  comfy-gen install-call --pod-id abc123 --token <t> --preset-id wan-video\n"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p_install_call.add_argument("--pod-id", required=True, help="Running installer pod id")
+    p_install_call.add_argument("--token", required=True, help="INSTALLER_TOKEN the pod was spawned with")
+    p_install_call.add_argument("--preset-id", required=True, help="Preset id from the manifest")
+    p_install_call.add_argument("--port", type=int, default=3000)
+    p_install_call.add_argument("--keep-alive", action="store_true")
+    p_install_call.add_argument("--civitai-token")
+    p_install_call.add_argument("--hf-token")
+
     args = parser.parse_args()
 
     try:
@@ -677,6 +775,8 @@ def main() -> None:
             "cancel": cmd_cancel,
             "list": cmd_list,
             "info": cmd_info,
+            "install-preset": cmd_install_preset,
+            "install-call": cmd_install_call,
         }[args.command](args)
     except ValueError as e:
         output.error(str(e))
