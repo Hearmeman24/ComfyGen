@@ -93,10 +93,19 @@ def submit_download(
 
     output.log(f"Job submitted: {job_id}")
 
+    from comfy_gen import _progress_format
+
     def _progress(elapsed, status, prog):
         msg = prog.get("message", "")
         pct = prog.get("percent")
-        if msg and pct is not None:
+        stage = prog.get("stage", "download")
+        # Reformat into the canonical progress-line shape when possible so
+        # BlockFlow's progress parser sees a stable structure (bead bmq.5 /
+        # A.1.2). Non-N/M lines (status, generic messages) stay as-is.
+        canonical = _progress_format.try_format_from_message(elapsed, stage, msg, pct)
+        if canonical:
+            output.log(canonical)
+        elif msg and pct is not None:
             output.log(f"[{elapsed}s] {msg} ({pct:.0f}%)")
         elif msg:
             output.log(f"[{elapsed}s] {msg}")

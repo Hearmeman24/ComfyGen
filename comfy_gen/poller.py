@@ -106,15 +106,23 @@ def poll_job(
             else:
                 done_since = None
 
-            # Custom progress display or default
+            # Custom progress display or default. Default branch tries the
+            # canonical progress-line shape (bead bmq.5 / A.1.2) before
+            # falling back to legacy free-form formatting.
             if progress_fn:
                 progress_fn(elapsed, status, prog)
-            elif msg and pct is not None:
-                output.log(f"[{elapsed}s] {msg} ({pct:.0f}%)")
-            elif msg:
-                output.log(f"[{elapsed}s] {msg}")
             else:
-                output.log(f"[{elapsed}s] {status}")
+                from comfy_gen import _progress_format
+                stage = prog.get("stage", status or "job")
+                canonical = _progress_format.try_format_from_message(elapsed, stage, msg, pct)
+                if canonical:
+                    output.log(canonical)
+                elif msg and pct is not None:
+                    output.log(f"[{elapsed}s] {msg} ({pct:.0f}%)")
+                elif msg:
+                    output.log(f"[{elapsed}s] {msg}")
+                else:
+                    output.log(f"[{elapsed}s] {status}")
         else:
             output.log(f"[{elapsed}s] {status}")
 
