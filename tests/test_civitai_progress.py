@@ -86,6 +86,10 @@ def test_streams_aria2c_progress_via_runpod_progress_update(fake_subprocess, mon
     import download_handler
     tmp_path, _ = fake_subprocess
 
+    # Block the API lookup so the test stays deterministic (and offline).
+    monkeypatch.setattr(download_handler, "_civitai_version_metadata",
+                        lambda v, token=None: None)
+
     sent: list[dict] = []
 
     class _FakeRunpod:
@@ -108,6 +112,7 @@ def test_streams_aria2c_progress_via_runpod_progress_update(fake_subprocess, mon
     assert sent, "expected at least one progress_update during the stream"
     p = sent[0]
     assert p["stage"] == "download"
+    # When the API lookup returns nothing, fall back to the abstract token.
     assert "civitai/2668710" in p["message"]
     assert "Downloading 3/8" in p["message"]
     assert 0 <= p["percent"] <= 100
@@ -116,6 +121,15 @@ def test_streams_aria2c_progress_via_runpod_progress_update(fake_subprocess, mon
 def test_streams_via_progress_callback_for_sse(fake_subprocess, monkeypatch):
     import download_handler
     tmp_path, _ = fake_subprocess
+
+    # API lookup returns the real filename + sha — but the sha won't match the
+    # fake file's content, so dedup misses and we go through the subprocess.
+    # This exercises the "filename in progress" path users actually see.
+    monkeypatch.setattr(download_handler, "_civitai_version_metadata",
+                        lambda v, token=None: {
+                            "filename": "wan22EnhancedNSFWSVICamera.gguf",
+                            "sha256": "a" * 64,
+                        })
 
     monkeypatch.setattr(download_handler, "runpod",
                         type("R", (), {"serverless": type("S", (), {
@@ -134,7 +148,8 @@ def test_streams_via_progress_callback_for_sse(fake_subprocess, monkeypatch):
 
     progress_events = [e for e in events if e["type"] == "download_progress"]
     assert progress_events, "expected at least one download_progress SSE event"
-    assert progress_events[0]["file"] == "civitai/2668710"
+    # User-requested: surface the actual filename, not `civitai/<vid>`.
+    assert progress_events[0]["file"] == "wan22EnhancedNSFWSVICamera.gguf"
     assert 0 <= progress_events[0]["percent"] <= 100
 
 
@@ -176,6 +191,8 @@ def test_parses_model_ready_at_line_even_when_dest_had_prior_files(monkeypatch, 
                         type("R", (), {"serverless": type("S", (), {
                             "progress_update": staticmethod(lambda j, p: None)
                         })()}))
+    monkeypatch.setattr(download_handler, "_civitai_version_metadata",
+                        lambda v, token=None: None)
 
     info = download_handler._download_civitai(
         version_id="2668710", dest_dir=str(tmp_path),
@@ -217,12 +234,130 @@ def test_aria2c_partial_files_are_ignored_in_diff_fallback(monkeypatch, tmp_path
                         type("R", (), {"serverless": type("S", (), {
                             "progress_update": staticmethod(lambda j, p: None)
                         })()}))
+    monkeypatch.setattr(download_handler, "_civitai_version_metadata",
+                        lambda v, token=None: None)
 
     info = download_handler._download_civitai(
         version_id="555", dest_dir=str(tmp_path),
         job={"id": "diff-fallback"},
     )
     assert info["filename"] == "model.safetensors"
+
+
+def test_dedup_skips_subprocess_when_existing_file_matches_api_sha(monkeypatch, tmp_path):
+    """The big win: if a file with the API-reported SHA256 already exists
+    in dest_dir, skip the multi-GB subprocess entirely.
+
+    Also exercises the CPU-pod path implicitly — both routes (GPU /download
+    and CPU install-preset) share download_handler.handle().
+    """
+    import download_handler
+
+    target = tmp_path / "model.safetensors"
+    payload = b"deterministic-bytes"
+    target.write_bytes(payload)
+    import hashlib
+    sha = hashlib.sha256(payload).hexdigest()
+
+    monkeypatch.setattr(download_handler, "_civitai_version_metadata",
+                        lambda v, token=None: {"filename": "model.safetensors", "sha256": sha})
+
+    # Popen MUST NOT be called. Fail loudly if it is.
+    def _no_popen(*a, **k):
+        raise AssertionError("subprocess should be skipped when sha matches cached file")
+    monkeypatch.setattr(download_handler.subprocess, "Popen", _no_popen)
+    monkeypatch.setattr(download_handler, "runpod",
+                        type("R", (), {"serverless": type("S", (), {
+                            "progress_update": staticmethod(lambda j, p: None)
+                        })()}))
+
+    info = download_handler._download_civitai(
+        version_id="999", dest_dir=str(tmp_path),
+        job={"id": "cached-1"},
+    )
+    assert info["cached"] is True
+    assert info["filename"] == "model.safetensors"
+    assert info["sha256"] == sha
+
+
+def test_dedup_finds_matching_file_even_when_filename_differs(monkeypatch, tmp_path):
+    """Hash match wins over filename mismatch — covers the case where a
+    prior install named the file differently but the bytes are the same."""
+    import download_handler
+    import hashlib
+
+    payload = b"same-bytes-different-name"
+    sha = hashlib.sha256(payload).hexdigest()
+    (tmp_path / "renamed_old.safetensors").write_bytes(payload)
+
+    monkeypatch.setattr(download_handler, "_civitai_version_metadata",
+                        lambda v, token=None: {"filename": "new_name.safetensors", "sha256": sha})
+    monkeypatch.setattr(download_handler.subprocess, "Popen",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not run")))
+    monkeypatch.setattr(download_handler, "runpod",
+                        type("R", (), {"serverless": type("S", (), {
+                            "progress_update": staticmethod(lambda j, p: None)
+                        })()}))
+
+    info = download_handler._download_civitai(
+        version_id="999", dest_dir=str(tmp_path),
+        job={"id": "cached-rename"},
+    )
+    assert info["cached"] is True
+    assert info["filename"] == "renamed_old.safetensors"
+
+
+def test_explicit_expected_sha_arg_overrides_api_lookup(monkeypatch, tmp_path):
+    """A caller-supplied sha (e.g. from a preset manifest) takes priority
+    over the API. We must not even hit the API in that case."""
+    import download_handler
+    import hashlib
+
+    payload = b"explicit-sha-flow"
+    sha = hashlib.sha256(payload).hexdigest()
+    (tmp_path / "model.safetensors").write_bytes(payload)
+
+    def _no_api(*a, **k):
+        raise AssertionError("API lookup should be skipped when caller supplied sha")
+    monkeypatch.setattr(download_handler, "_civitai_version_metadata", _no_api)
+
+    monkeypatch.setattr(download_handler.subprocess, "Popen",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not run")))
+    monkeypatch.setattr(download_handler, "runpod",
+                        type("R", (), {"serverless": type("S", (), {
+                            "progress_update": staticmethod(lambda j, p: None)
+                        })()}))
+
+    info = download_handler._download_civitai(
+        version_id="999", dest_dir=str(tmp_path),
+        job={"id": "explicit"}, expected_sha=sha,
+    )
+    assert info["cached"] is True
+
+
+def test_civitai_filename_appears_in_progress_message_when_api_supplies_it(fake_subprocess, monkeypatch):
+    """User-facing log fix: progress message says 'wan22Enhanced...gguf 45%',
+    not 'civitai/2668710 45%'."""
+    import download_handler
+    tmp_path, _ = fake_subprocess
+
+    monkeypatch.setattr(download_handler, "_civitai_version_metadata",
+                        lambda v, token=None: {"filename": "wan22Enhanced.gguf", "sha256": "z" * 64})
+
+    sent: list[dict] = []
+    monkeypatch.setattr(download_handler, "runpod",
+                        type("R", (), {"serverless": type("S", (), {
+                            "progress_update": staticmethod(lambda j, p: sent.append(p))
+                        })()}))
+
+    download_handler._download_civitai(
+        version_id="2668710", dest_dir=str(tmp_path),
+        job={"id": "fname-disp"}, item_index=0, total_items=1,
+    )
+    assert sent
+    msg = sent[0]["message"]
+    assert "wan22Enhanced.gguf" in msg, msg
+    assert "civitai/2668710" not in msg
 
 
 def test_nonzero_exit_includes_log_tail(monkeypatch, tmp_path):
@@ -235,6 +370,8 @@ def test_nonzero_exit_includes_log_tail(monkeypatch, tmp_path):
 
     monkeypatch.setattr(download_handler.subprocess, "Popen",
                         lambda *a, **k: _FailingProc())
+    monkeypatch.setattr(download_handler, "_civitai_version_metadata",
+                        lambda v, token=None: None)
 
     with pytest.raises(RuntimeError, match="exit 2") as exc:
         download_handler._download_civitai("999", str(tmp_path))
