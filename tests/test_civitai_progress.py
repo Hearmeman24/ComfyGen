@@ -138,6 +138,93 @@ def test_streams_via_progress_callback_for_sse(fake_subprocess, monkeypatch):
     assert 0 <= progress_events[0]["percent"] <= 100
 
 
+def test_parses_model_ready_at_line_even_when_dest_had_prior_files(monkeypatch, tmp_path):
+    """Regression: a prior failed install can leave files in the dest dir.
+    aria2c resumes/overwrites in place, so `after - before` is empty even
+    though the download succeeded. We must use the script's
+    'Model ready at: <path>' line as the authoritative answer."""
+    import download_handler
+
+    # Simulate "prior attempt" debris: the target file already exists.
+    stale = tmp_path / "wan22EnhancedNSFWSVICamera_nolightningSVICfQ8H.gguf"
+    stale.write_bytes(b"old content")
+    (tmp_path / "wan22EnhancedNSFWSVICamera_nolightningSVICfQ8L.gguf.aria2").write_bytes(b"partial")
+    (tmp_path / "put_unet_files_here").write_bytes(b"marker")
+
+    lines = [
+        "[#4face3 14GiB/14GiB(100%) CN:8 DL:291MiB]",
+        "Download Results:",
+        "4face3|OK  |   291MiB/s|100|" + str(stale),
+        "Status Legend: (OK):download completed.",
+        "🔍 Checking for downloaded files...",
+        "✅ Download complete: File valid (14692.9MB)",
+        "🔍 Processing file: wan22EnhancedNSFWSVICamera_nolightningSVICfQ8H.gguf",
+        f"✅ Model ready at: {stale}",
+    ]
+
+    class _Proc:
+        returncode = 0
+        def __init__(self):
+            self.stdout = (l + "\n" for l in lines)
+        def wait(self, timeout=None):
+            # Refresh mtime to simulate aria2c rewriting the file
+            stale.write_bytes(b"x" * (2 * 1024 * 1024))
+            return 0
+
+    monkeypatch.setattr(download_handler.subprocess, "Popen", lambda *a, **k: _Proc())
+    monkeypatch.setattr(download_handler, "runpod",
+                        type("R", (), {"serverless": type("S", (), {
+                            "progress_update": staticmethod(lambda j, p: None)
+                        })()}))
+
+    info = download_handler._download_civitai(
+        version_id="2668710", dest_dir=str(tmp_path),
+        job={"id": "regression-15u"},
+    )
+
+    assert info["filename"] == stale.name
+    assert info["path"] == str(stale)
+    assert info["size_mb"] > 0
+
+
+def test_aria2c_partial_files_are_ignored_in_diff_fallback(monkeypatch, tmp_path):
+    """When the 'Model ready at:' marker is absent, the diff fallback must
+    ignore .aria2 partial-state files — picking one would return a path the
+    caller can't actually use."""
+    import download_handler
+
+    # No prior files: dir starts empty.
+    real_file = tmp_path / "model.safetensors"
+
+    lines = [
+        "[#abc 100%]",
+        "Download Results:",
+        # No "Model ready at:" line — forces the diff fallback path.
+    ]
+
+    class _Proc:
+        returncode = 0
+        def __init__(self):
+            self.stdout = (l + "\n" for l in lines)
+        def wait(self, timeout=None):
+            real_file.write_bytes(b"x" * 1024)
+            # Also drop a stray .aria2 partial; the picker must skip it.
+            (tmp_path / "model.safetensors.aria2").write_bytes(b"")
+            return 0
+
+    monkeypatch.setattr(download_handler.subprocess, "Popen", lambda *a, **k: _Proc())
+    monkeypatch.setattr(download_handler, "runpod",
+                        type("R", (), {"serverless": type("S", (), {
+                            "progress_update": staticmethod(lambda j, p: None)
+                        })()}))
+
+    info = download_handler._download_civitai(
+        version_id="555", dest_dir=str(tmp_path),
+        job={"id": "diff-fallback"},
+    )
+    assert info["filename"] == "model.safetensors"
+
+
 def test_nonzero_exit_includes_log_tail(monkeypatch, tmp_path):
     import download_handler
 
