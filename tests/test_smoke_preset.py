@@ -19,10 +19,12 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "automation"))
 
 from smoke_preset import (  # noqa: E402
+    SupplyConstrainedError,
     choose_workflow,
     fetch_smoke_inputs,
     resolve_volume_for_endpoint,
     run_install_preset,
+    run_with_retry,
 )
 
 
@@ -262,3 +264,83 @@ def test_resolve_volume_for_endpoint_singular_field_fallback():
     with patch("urllib.request.urlopen",
                return_value=FakeResp({"networkVolumeId": "vol-singular"})):
         assert resolve_volume_for_endpoint("rpa_x", "ep-1") == "vol-singular"
+
+
+# --- supply-constraint detection + retry policy ---
+
+
+def test_run_install_preset_surfaces_status_error_stdout():
+    """When the CLI emits {status:error,error:...} on stdout (e.g. RuntimeError
+    caught by main()), run_install_preset must include the message in its
+    RuntimeError instead of swallowing it as `stderr tail: (empty)`."""
+    events = [
+        {"status": "error",
+         "error": "pod spawn failed — no CPU instance available for any of "
+                  "['cpu3c-2-4']; last=SUPPLY_CONSTRAINT"},
+    ]
+    with patch.object(_subprocess, "Popen", _fake_popen_with_events(events, returncode=1)):
+        with pytest.raises(SupplyConstrainedError, match="SUPPLY_CONSTRAINT"):
+            run_install_preset(preset_id="x", volume_id="v")
+
+
+def test_run_install_preset_non_supply_error_still_runtimeerror():
+    """A non-capacity status:error must still raise (just plain RuntimeError,
+    not the SupplyConstrainedError subclass) so the caller doesn't retry."""
+    events = [
+        {"status": "error", "error": "runpod_api_key not configured"},
+    ]
+    with patch.object(_subprocess, "Popen", _fake_popen_with_events(events, returncode=1)):
+        with pytest.raises(RuntimeError, match="runpod_api_key not configured") as ei:
+            run_install_preset(preset_id="x", volume_id="v")
+        assert not isinstance(ei.value, SupplyConstrainedError)
+
+
+def test_run_with_retry_succeeds_after_supply_constraint():
+    """Caller retries on SupplyConstrainedError until smoke() succeeds."""
+    calls = {"n": 0}
+
+    def attempt():
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise SupplyConstrainedError("SUPPLY_CONSTRAINT (attempt < 3)")
+        return {"ok": True, "preset_id": "x"}
+
+    # Patch sleep so the test is fast; backoff schedule is exercised via calls.
+    sleeps: list[float] = []
+    with patch("smoke_preset.time.sleep", side_effect=sleeps.append):
+        result = run_with_retry(attempt, max_wall_seconds=300)
+    assert result == {"ok": True, "preset_id": "x"}
+    assert calls["n"] == 3
+    # Backoff is monotonically increasing (or capped); never zero.
+    assert all(s > 0 for s in sleeps)
+    assert sleeps == sorted(sleeps)
+
+
+def test_run_with_retry_skips_after_wall_clock_budget():
+    """After max_wall_seconds of capacity errors, return a skip envelope (don't raise)."""
+    def attempt():
+        raise SupplyConstrainedError("SUPPLY_CONSTRAINT")
+
+    # Fake monotonic clock: each call to time.monotonic advances 60 seconds.
+    clock = {"t": 0.0}
+
+    def fake_monotonic():
+        clock["t"] += 60.0
+        return clock["t"]
+
+    with patch("smoke_preset.time.sleep"), \
+         patch("smoke_preset.time.monotonic", side_effect=fake_monotonic):
+        result = run_with_retry(attempt, max_wall_seconds=300)
+    assert result["ok"] is True
+    assert result["skipped"] is True
+    assert "supply" in result["reason"].lower() or "capacity" in result["reason"].lower()
+
+
+def test_run_with_retry_non_supply_error_propagates():
+    """A non-supply-constraint exception must NOT be retried; it should bubble."""
+    def attempt():
+        raise RuntimeError("install_done.ok=False")
+
+    with patch("smoke_preset.time.sleep"):
+        with pytest.raises(RuntimeError, match="install_done.ok=False"):
+            run_with_retry(attempt, max_wall_seconds=300)

@@ -27,6 +27,18 @@ import urllib.request
 
 MANIFEST_URL = "https://raw.githubusercontent.com/Hearmeman24/blockflow-presets/main/manifest.json"
 
+# Substrings that mark a RunPod CPU-pod spawn failure as a transient capacity
+# issue (not a hard configuration / auth error). The CLI's spawn loop emits
+# "pod spawn failed — no CPU instance available" once every candidate SKU has
+# been exhausted; RunPod's GraphQL surfaces "SUPPLY_CONSTRAINT" in the error
+# payload for the same condition.
+_SUPPLY_CONSTRAINT_MARKERS = ("SUPPLY_CONSTRAINT", "no CPU instance available")
+
+
+class SupplyConstrainedError(RuntimeError):
+    """install-preset gave up because no CPU SKU had capacity. Caller should
+    retry with backoff rather than failing the CI run."""
+
 
 def choose_workflow(preset: dict) -> dict:
     """Return the single workflow this smoke run will exercise.
@@ -146,6 +158,11 @@ def run_install_preset(preset_id: str, volume_id: str,
     pod_id: str | None = None
     terminal: dict | None = None
     error: str | None = None
+    # When the CLI hits an early RuntimeError (no API key, GraphQL refusal,
+    # SUPPLY_CONSTRAINT, etc.) it emits `{"status":"error","error":"..."}` to
+    # stdout via output.error() and exits 1. Capture the LAST such line so we
+    # can surface it instead of reporting "stderr tail: (empty)".
+    cli_error: str | None = None
 
     assert proc.stdout is not None
     for raw in proc.stdout:
@@ -175,11 +192,18 @@ def run_install_preset(preset_id: str, volume_id: str,
                 f"{event.get('reason', '<no reason>')}"
             )
             break
+        elif event.get("status") == "error":
+            cli_error = event.get("error") or json.dumps(event)
 
     proc.wait(timeout=timeout)
     if error:
         raise RuntimeError(error)
     if terminal is None:
+        if cli_error is not None:
+            exc = SupplyConstrainedError(cli_error) \
+                if any(m in cli_error for m in _SUPPLY_CONSTRAINT_MARKERS) \
+                else RuntimeError(cli_error)
+            raise exc
         stderr_tail = (proc.stderr.read() if proc.stderr else b"").decode(errors="replace")[-500:]
         raise RuntimeError(
             f"install-preset unexpected exit ({proc.returncode}) with no "
@@ -344,6 +368,42 @@ def smoke(preset_id: str, endpoint_id: str, workflow_timeout: int,
     }
 
 
+def run_with_retry(attempt, max_wall_seconds: int = 300,
+                   initial_backoff: float = 30.0,
+                   max_backoff: float = 120.0) -> dict:
+    """Run `attempt()` and retry on SupplyConstrainedError with exponential
+    backoff (30s → 60s → 120s, capped). Give up after `max_wall_seconds` of
+    wall time and return a skip envelope so the CI job can exit 0.
+
+    Non-supply exceptions propagate. The skip envelope is shaped so the
+    smoke main loop's `print(json.dumps(result))` still produces valid
+    smoke output.
+    """
+    deadline = time.monotonic() + max_wall_seconds
+    delay = initial_backoff
+    last_msg: str | None = None
+    while True:
+        try:
+            return attempt()
+        except SupplyConstrainedError as exc:
+            last_msg = str(exc)
+            now = time.monotonic()
+            if now >= deadline:
+                return {
+                    "ok": True,
+                    "skipped": True,
+                    "reason": f"CPU supply constraint persisted for "
+                              f"{max_wall_seconds}s; last={last_msg}",
+                }
+            remaining = deadline - now
+            sleep_for = min(delay, remaining)
+            print(f"[smoke] SUPPLY_CONSTRAINT — retrying in {sleep_for:.0f}s "
+                  f"(budget {remaining:.0f}s left). last={last_msg}",
+                  file=sys.stderr, flush=True)
+            time.sleep(sleep_for)
+            delay = min(delay * 2, max_backoff)
+
+
 def main() -> None:
     p = argparse.ArgumentParser(
         description=__doc__,
@@ -356,11 +416,20 @@ def main() -> None:
     p.add_argument("--runtime-repo-ref", metavar="REF",
                    help="Override RUNTIME_REPO_REF on the installer pod (used "
                         "pre-merge to test feature branches of serverless-runtime)")
+    p.add_argument("--supply-constraint-budget", type=int, default=300,
+                   help="Max wall-clock seconds to keep retrying on RunPod CPU "
+                        "SUPPLY_CONSTRAINT before exiting 0 with skipped=true "
+                        "(default 300 = 5 minutes)")
     args = p.parse_args()
 
     try:
-        result = smoke(args.preset_id, args.endpoint_id, args.workflow_timeout,
-                       runtime_repo_ref=args.runtime_repo_ref)
+        result = run_with_retry(
+            lambda: smoke(args.preset_id, args.endpoint_id, args.workflow_timeout,
+                          runtime_repo_ref=args.runtime_repo_ref),
+            max_wall_seconds=args.supply_constraint_budget,
+        )
+        result.setdefault("preset_id", args.preset_id)
+        result.setdefault("endpoint_id", args.endpoint_id)
         print(json.dumps(result))
         sys.exit(0)
     except Exception as e:
