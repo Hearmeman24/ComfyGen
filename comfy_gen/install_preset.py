@@ -28,7 +28,7 @@ from comfy_gen import config, output
 
 
 DEFAULT_PORT = 3000
-DEFAULT_IMAGE = "hearmeman/comfyui-serverless:installer-v5"
+DEFAULT_IMAGE = "hearmeman/comfyui-serverless:installer-v6"
 DEFAULT_HEALTH_TIMEOUT_SEC = 180
 HEALTH_POLL_INTERVAL_SEC = 3
 SSE_READ_TIMEOUT_SEC = 3600  # multi-GB download — let it run
