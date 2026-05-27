@@ -15,6 +15,9 @@ import hashlib
 import io
 import json
 import os
+import subprocess
+import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -447,6 +450,44 @@ def test_send_progress_is_noop_without_runpod_harness(monkeypatch):
         raise RuntimeError("no harness")
     monkeypatch.setattr(download_handler.runpod.serverless, "progress_update", boom)
     download_handler._send_progress({"id": "x"}, "msg", 50.0)  # must not raise
+
+
+def test_stream_process_output_kills_silent_process_on_timeout():
+    """A silent child must not trap the downloader in a blocking stdout loop."""
+    proc = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    started = time.monotonic()
+
+    with pytest.raises(subprocess.TimeoutExpired):
+        download_handler._stream_process_output(proc, 0.2, lambda _line: None)
+
+    assert time.monotonic() - started < 2.0
+    assert proc.poll() is not None
+
+
+def test_download_url_times_out_silent_aria2c(monkeypatch, tmp_path):
+    """_download_url must turn a silent aria2c hang into a bounded failure."""
+    real_popen = subprocess.Popen
+
+    def fake_popen(_argv, **kwargs):
+        return real_popen(
+            [sys.executable, "-c", "import time; time.sleep(30)"],
+            **kwargs,
+        )
+
+    monkeypatch.setattr(download_handler.subprocess, "Popen", fake_popen)
+
+    with pytest.raises(RuntimeError, match="aria2c download timed out"):
+        download_handler._download_url(
+            "https://example.com/stuck.bin",
+            str(tmp_path),
+            filename="stuck.bin",
+            timeout_sec=0.2,
+        )
 
 
 # --- progress_callback hook (installer-server SSE bridge) ---
