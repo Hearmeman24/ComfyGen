@@ -512,3 +512,96 @@ def test_progress_callback_omitted_keeps_legacy_behavior(fake_aria2c, models_bas
 
     assert result["ok"] is True
     assert seen, "legacy progress_update path must still fire when no callback supplied"
+
+
+
+# --- parallelism (download manager) ---
+
+def test_downloads_run_in_parallel(models_base, mocker):
+    """Two downloads launched simultaneously must overlap, not serialize.
+
+    Each fake aria2c records its start time, sleeps 200ms (simulating I/O),
+    writes the file. With max_workers=2 the total elapsed should be roughly
+    one sleep, not two."""
+    import time, threading
+
+    started_times: list[float] = []
+    started_lock = threading.Lock()
+
+    class _SlowProc:
+        def __init__(self, argv, **_):
+            with started_lock:
+                started_times.append(time.monotonic())
+            dest_dir = argv[argv.index("-d") + 1]
+            filename = argv[argv.index("-o") + 1]
+            os.makedirs(dest_dir, exist_ok=True)
+            time.sleep(0.2)
+            with open(os.path.join(dest_dir, filename), "wb") as f:
+                f.write(REAL_BYTES)
+            self.stdout = iter([])
+            self.returncode = 0
+        def wait(self, timeout=None):
+            return 0
+
+    mocker.patch.object(download_handler.subprocess, "Popen", _SlowProc)
+
+    t0 = time.monotonic()
+    result = download_handler.handle(_job([
+        {"source": "url", "url": "https://example.com/a.safetensors", "dest": "loras"},
+        {"source": "url", "url": "https://example.com/b.safetensors", "dest": "loras"},
+    ]))
+    elapsed = time.monotonic() - t0
+    assert result["ok"] is True
+
+    assert len(started_times) == 2
+    gap = abs(started_times[1] - started_times[0])
+    assert gap < 0.1, f"downloads serialized: start gap = {gap:.3f}s"
+    assert elapsed < 0.35, f"total elapsed {elapsed:.3f}s suggests serialization"
+
+
+def test_parallel_results_preserve_input_order(fake_aria2c, models_base):
+    """Even with out-of-order completion, results[i] must correspond to
+    downloads[i] — callers index into both lists by position."""
+    result = download_handler.handle(_job([
+        {"source": "url", "url": "https://example.com/first.safetensors", "dest": "loras"},
+        {"source": "url", "url": "https://example.com/second.safetensors", "dest": "loras"},
+        {"source": "url", "url": "https://example.com/third.safetensors", "dest": "loras"},
+    ]))
+    names = [f["filename"] for f in result["files"]]
+    assert names == ["first.safetensors", "second.safetensors", "third.safetensors"]
+
+
+def test_one_failure_in_parallel_batch_fails_the_job(models_base, mocker):
+    """If any download raises, the whole batch fails — but already-running
+    downloads are allowed to complete (we don't waste partial bandwidth)."""
+    import hashlib
+
+    bogus_sha = "0" * 64
+    real_sha = hashlib.sha256(REAL_BYTES).hexdigest()
+
+    class _Proc:
+        def __init__(self, argv, **_):
+            dest_dir = argv[argv.index("-d") + 1]
+            filename = argv[argv.index("-o") + 1]
+            os.makedirs(dest_dir, exist_ok=True)
+            with open(os.path.join(dest_dir, filename), "wb") as f:
+                f.write(REAL_BYTES)
+            checksum_arg = next((a for a in argv if a.startswith("--checksum=")), None)
+            self.returncode = 0
+            if checksum_arg:
+                expected = checksum_arg.split("=", 2)[2].lower()
+                if expected != real_sha:
+                    self.returncode = 32
+            self.stdout = iter([])
+        def wait(self, timeout=None):
+            return self.returncode
+
+    mocker.patch.object(download_handler.subprocess, "Popen", _Proc)
+
+    with pytest.raises(RuntimeError, match="sha256 mismatch"):
+        download_handler.handle(_job([
+            {"source": "url", "url": "https://example.com/a.safetensors",
+             "dest": "loras", "sha256": real_sha},
+            {"source": "url", "url": "https://example.com/b.safetensors",
+             "dest": "loras", "sha256": bogus_sha},
+        ]))
