@@ -280,20 +280,31 @@ def test_dedup_skips_subprocess_when_existing_file_matches_api_sha(monkeypatch, 
     assert info["sha256"] == sha
 
 
-def test_dedup_finds_matching_file_even_when_filename_differs(monkeypatch, tmp_path):
-    """Hash match wins over filename mismatch — covers the case where a
-    prior install named the file differently but the bytes are the same."""
+def test_dedup_skips_when_only_renamed_match_exists(monkeypatch, tmp_path):
+    """When the file exists at a DIFFERENT name than the API reports, we no
+    longer scan-and-hash the whole directory looking for matches (bead cwt —
+    that was costing minutes on populated network volumes). Dedup misses and
+    the subprocess runs. The rare same-bytes-renamed case is sacrificed for
+    predictable latency."""
     import download_handler
     import hashlib
 
     payload = b"same-bytes-different-name"
     sha = hashlib.sha256(payload).hexdigest()
     (tmp_path / "renamed_old.safetensors").write_bytes(payload)
+    target = tmp_path / "new_name.safetensors"
 
     monkeypatch.setattr(download_handler, "_civitai_version_metadata",
                         lambda v, token=None: {"filename": "new_name.safetensors", "sha256": sha})
-    monkeypatch.setattr(download_handler.subprocess, "Popen",
-                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not run")))
+
+    class _Proc:
+        returncode = 0
+        def __init__(self):
+            self.stdout = iter([f"Model ready at: {target}\n"])
+        def wait(self, timeout=None):
+            target.write_bytes(b"x" * (2 * 1024 * 1024))
+            return 0
+    monkeypatch.setattr(download_handler.subprocess, "Popen", lambda *a, **k: _Proc())
     monkeypatch.setattr(download_handler, "runpod",
                         type("R", (), {"serverless": type("S", (), {
                             "progress_update": staticmethod(lambda j, p: None)
@@ -303,26 +314,32 @@ def test_dedup_finds_matching_file_even_when_filename_differs(monkeypatch, tmp_p
         version_id="999", dest_dir=str(tmp_path),
         job={"id": "cached-rename"},
     )
-    assert info["cached"] is True
-    assert info["filename"] == "renamed_old.safetensors"
+    assert info.get("cached") is not True
+    assert info["filename"] == "new_name.safetensors"
 
 
-def test_explicit_expected_sha_arg_overrides_api_lookup(monkeypatch, tmp_path):
-    """A caller-supplied sha (e.g. from a preset manifest) takes priority
-    over the API. We must not even hit the API in that case."""
+def test_explicit_expected_sha_without_hint_skips_dedup(monkeypatch, tmp_path):
+    """Caller-supplied expected_sha but no filename hint → we can't safely
+    dedup without scanning, so we skip dedup and run the subprocess."""
     import download_handler
     import hashlib
 
     payload = b"explicit-sha-flow"
     sha = hashlib.sha256(payload).hexdigest()
     (tmp_path / "model.safetensors").write_bytes(payload)
+    new_file = tmp_path / "model_v2.safetensors"
 
-    def _no_api(*a, **k):
-        raise AssertionError("API lookup should be skipped when caller supplied sha")
-    monkeypatch.setattr(download_handler, "_civitai_version_metadata", _no_api)
+    monkeypatch.setattr(download_handler, "_civitai_version_metadata",
+                        lambda v, token=None: None)
 
-    monkeypatch.setattr(download_handler.subprocess, "Popen",
-                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not run")))
+    class _Proc:
+        returncode = 0
+        def __init__(self):
+            self.stdout = iter([f"Model ready at: {new_file}\n"])
+        def wait(self, timeout=None):
+            new_file.write_bytes(b"x" * (2 * 1024 * 1024))
+            return 0
+    monkeypatch.setattr(download_handler.subprocess, "Popen", lambda *a, **k: _Proc())
     monkeypatch.setattr(download_handler, "runpod",
                         type("R", (), {"serverless": type("S", (), {
                             "progress_update": staticmethod(lambda j, p: None)
@@ -332,7 +349,27 @@ def test_explicit_expected_sha_arg_overrides_api_lookup(monkeypatch, tmp_path):
         version_id="999", dest_dir=str(tmp_path),
         job={"id": "explicit"}, expected_sha=sha,
     )
-    assert info["cached"] is True
+    assert info.get("cached") is not True
+
+
+def test_find_file_by_sha_does_not_scan_whole_directory(tmp_path):
+    """Critical perf guard: with no hint_name, the function must return
+    immediately. With a hint_name that doesn't exist, also immediate.
+    No hashing of unrelated files allowed (bead cwt)."""
+    import download_handler
+
+    for n in ("a.safetensors", "b.safetensors", "c.safetensors"):
+        (tmp_path / n).write_bytes(b"x" * 64 * 1024)
+
+    def _explode(*a, **k):
+        raise AssertionError(f"_sha256_file called unexpectedly: {a}")
+    orig = download_handler._sha256_file
+    download_handler._sha256_file = _explode
+    try:
+        assert download_handler._find_file_by_sha(str(tmp_path), "deadbeef") is None
+        assert download_handler._find_file_by_sha(str(tmp_path), "deadbeef", hint_name="nope.bin") is None
+    finally:
+        download_handler._sha256_file = orig
 
 
 def test_civitai_filename_appears_in_progress_message_when_api_supplies_it(fake_subprocess, monkeypatch):
