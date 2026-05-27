@@ -397,6 +397,30 @@ def test_civitai_filename_appears_in_progress_message_when_api_supplies_it(fake_
     assert "civitai/2668710" not in msg
 
 
+def test_sha256_heartbeat_fires_on_long_hashes(monkeypatch, tmp_path, capsys):
+    """Bead 8r7 — the post-download verify must not go silent on large files.
+    Simulate elapsed time advancing 16s per chunk so the heartbeat (every 15s)
+    fires multiple times during a single hash."""
+    import download_handler
+
+    target = tmp_path / "big.safetensors"
+    target.write_bytes(b"x" * (256 * 1024))  # 4 chunks of 64 KiB
+
+    t = [1000.0]
+    def fake_time():
+        t[0] += 16  # always past the 15s heartbeat threshold
+        return t[0]
+    monkeypatch.setattr(download_handler.time, "time", fake_time)
+
+    digest = download_handler._sha256_file_with_heartbeat(
+        str(target), job_tag="abc12345", label=target.name,
+    )
+    assert digest  # real hash returned
+    out = capsys.readouterr().out
+    assert "still hashing big.safetensors" in out
+    assert "[job abc12345]" in out
+
+
 def test_nonzero_exit_includes_log_tail(monkeypatch, tmp_path):
     import download_handler
 
