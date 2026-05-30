@@ -63,20 +63,21 @@ Requires Python 3.11+.
 ```bash
 brew install pipx        # macOS — or: apt install pipx / pip install pipx
 pipx ensurepath          # adds pipx bin dir to PATH (restart your shell after)
-
-git clone https://github.com/Hearmeman24/ComfyGen.git
-cd ComfyGen
-pipx install --editable .
-pipx inject comfy-gen boto3
+pipx install comfy-gen
 ```
 
 ### Alternative: pip
 
 ```bash
+python -m pip install comfy-gen
+```
+
+### Development install
+
+```bash
 git clone https://github.com/Hearmeman24/ComfyGen.git
 cd ComfyGen
-pip install -e .
-pip install boto3
+python -m pip install -e '.[dev]'
 ```
 
 After installation, `comfy-gen` is available system-wide as a CLI command.
@@ -349,7 +350,7 @@ URL=$(comfy-gen submit workflow.json 2>/dev/null | jq -r '.output.url')
 You need:
 1. A **RunPod account** — `comfy-gen init` creates the serverless endpoint for you
 2. **S3-compatible storage** — AWS S3, Cloudflare R2, Backblaze B2, or any S3-compatible service (see [Storage](#storage))
-3. **Python 3.11+** and `boto3` (`pipx inject comfy-gen boto3` or `pip install boto3`)
+3. **Python 3.11+**
 
 ## License
 

@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=68.0"]
+requires = ["setuptools>=77.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -7,13 +7,16 @@ name = "comfy-gen"
 version = "0.2.0"
 description = "Agent-first CLI for executing ComfyUI workflows on RunPod serverless"
 readme = "README.md"
-license = {text = "MIT"}
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.11"
+dependencies = [
+    "boto3>=1.34",
+]
 keywords = ["comfyui", "runpod", "serverless", "image-generation", "cli"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
@@ -22,6 +25,11 @@ classifiers = [
 
 [project.scripts]
 comfy-gen = "comfy_gen.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/Hearmeman24/ComfyGen"
+Repository = "https://github.com/Hearmeman24/ComfyGen"
+Issues = "https://github.com/Hearmeman24/ComfyGen/issues"
 
 [project.optional-dependencies]
 dev = [

@@ -42,11 +42,7 @@ Requires Python 3.11+
 ```bash
 brew install pipx        # macOS — or: apt install pipx / pip install pipx
 pipx ensurepath          # adds pipx bin dir to PATH (restart your shell after)
-
-git clone https://github.com/Hearmeman24/ComfyGen.git
-cd ComfyGen
-pipx install --editable .
-pipx inject comfy-gen boto3
+pipx install comfy-gen
 ```
 
 ### Install (Windows)
@@ -56,11 +52,7 @@ Requires Python 3.11+ — make sure **"Add Python to PATH"** is checked during i
 ```powershell
 pip install pipx
 pipx ensurepath          # restart your terminal after this
-
-git clone https://github.com/Hearmeman24/ComfyGen.git
-cd ComfyGen
-pipx install --editable .
-pipx inject comfy-gen boto3
+pipx install comfy-gen
 ```
 
 > **If `comfy-gen` is not found after install:** add Python's `Scripts` directory to your PATH manually (e.g. `C:\Users\<you>\AppData\Local\Programs\Python\Python3xx\Scripts`).
