@@ -27,7 +27,7 @@ def patched(monkeypatch, tmp_path):
     _download_civitai hands off."""
     import download_handler
 
-    seen: dict = {"url_calls": [], "metadata_calls": []}
+    seen: dict = {"url_calls": [], "metadata_calls": [], "resolve_calls": []}
 
     def fake_metadata(version_id, token=None):
         seen["metadata_calls"].append({"version_id": version_id, "token": token})
@@ -48,7 +48,17 @@ def patched(monkeypatch, tmp_path):
             "bytes": 2 * 1024 * 1024,
         }
 
+    def fake_resolve_download_url(download_url, token=None):
+        seen["resolve_calls"].append({"download_url": download_url, "token": token})
+        return seen.get("resolved_download_url", download_url)
+
     monkeypatch.setattr(download_handler, "_civitai_version_metadata", fake_metadata)
+    monkeypatch.setattr(
+        download_handler,
+        "_resolve_civitai_download_url",
+        fake_resolve_download_url,
+        raising=False,
+    )
     monkeypatch.setattr(download_handler, "_download_url", fake_download_url)
     monkeypatch.setattr(download_handler, "runpod",
                         type("R", (), {"serverless": type("S", (), {
@@ -112,7 +122,7 @@ def test_cache_miss_hands_off_to_download_url_with_checksum(patched):
     assert info["sha256"] == "a" * 64
 
 
-def test_civitai_token_passed_as_auth_header_to_aria2c(patched, monkeypatch):
+def test_civitai_token_resolves_redirect_but_is_not_passed_to_aria2c(patched, monkeypatch):
     seen, tmp_path = patched
     monkeypatch.setenv("CIVITAI_TOKEN", "secret-token-123")
     import download_handler
@@ -122,10 +132,16 @@ def test_civitai_token_passed_as_auth_header_to_aria2c(patched, monkeypatch):
         "sha256": "b" * 64,
         "download_url": "https://civitai.com/api/download/models/555",
     }
+    seen["resolved_download_url"] = "https://b2.civitai.com/file/model.safetensors?Authorization=signed"
 
     download_handler._download_civitai("555", str(tmp_path))
+    assert seen["resolve_calls"] == [{
+        "download_url": "https://civitai.com/api/download/models/555",
+        "token": "secret-token-123",
+    }]
     call = seen["url_calls"][0]
-    assert call["extra_aria_args"] == ["--header=Authorization: Bearer secret-token-123"]
+    assert call["url"] == "https://b2.civitai.com/file/model.safetensors?Authorization=signed"
+    assert call["extra_aria_args"] == []
 
 
 def test_no_token_means_no_auth_header(patched, monkeypatch):
@@ -258,6 +274,7 @@ def test_metadata_failure_uses_caller_filename_and_sha_fallback(monkeypatch, tmp
         return {"filename": kwargs["filename"], "path": path, "size_mb": 0.0}
 
     monkeypatch.setattr(download_handler, "_civitai_version_metadata", fake_metadata)
+    monkeypatch.setattr(download_handler, "_resolve_civitai_download_url", lambda url, token=None: url)
     monkeypatch.setattr(download_handler, "_download_url", fake_download_url)
 
     info = download_handler._download_civitai(
