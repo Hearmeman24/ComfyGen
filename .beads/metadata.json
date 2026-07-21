@@ -1,7 +1,0 @@
-{
-  "database": "dolt",
-  "backend": "dolt",
-  "dolt_mode": "embedded",
-  "dolt_database": "remote_comfy_generator",
-  "project_id": "591a7c81-a64b-443b-abff-cd2161eaf571"
-}
