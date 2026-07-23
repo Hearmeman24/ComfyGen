@@ -65,6 +65,26 @@ def test_list_still_filters_random_extensions(fake_models, dispatch_command):
     assert filenames == ["real.safetensors"]
 
 
+def test_list_recurses_into_subfolders(fake_models, dispatch_command):
+    """LoRAs stored in subfolders (models/loras/folder_a/x) must be listed.
+
+    ComfyUI references them by their loras-root-relative path, so the reported
+    filename must include the subfolder with forward slashes.
+    """
+    _, volume = fake_models
+    _touch(volume / "loras" / "top.safetensors")
+    _touch(volume / "loras" / "folder_a" / "a.safetensors")
+    _touch(volume / "loras" / "folder_b" / "nested" / "b.safetensors")
+
+    res = dispatch_command({"command": "list_models", "model_type": "loras"})
+    filenames = sorted(f["filename"] for f in res["files"])
+    assert filenames == [
+        "folder_a/a.safetensors",
+        "folder_b/nested/b.safetensors",
+        "top.safetensors",
+    ]
+
+
 def test_list_existing_allowlist_still_works(fake_models, dispatch_command):
     """Regression guard for the original extensions."""
     _, volume = fake_models
